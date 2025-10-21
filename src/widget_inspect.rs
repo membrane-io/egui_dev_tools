@@ -240,6 +240,15 @@ impl Plugin for WidgetInspect {
                         }
                         false
                     }
+                    Event::Key {
+                        key: Key::Escape,
+                        repeat: false,
+                        pressed: true,
+                        ..
+                    } => {
+                        self.enabled = false;
+                        false
+                    }
                     // Let everything else through
                     _ => true,
                 }
@@ -247,6 +256,7 @@ impl Plugin for WidgetInspect {
         }
     }
 
+    #[cfg_attr(not(debug_assertions), expect(dead_code))]
     fn on_widget_under_pointer(&mut self, _ctx: &Context, widget: &WidgetRect) {
         // Some widgets call `Context::create_widget` twice, once during creation and once after all of its
         // call because it's the callstack that creates it. The second call contains the final
@@ -807,7 +817,7 @@ pub fn cut_rects(rects: &mut Vec<Rect>, hole: Rect, mut min_side: f32) {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-struct Callstack(Vec<backtrace::BacktraceFrame>);
+struct Callstack(Vec<backtrace::Frame>);
 
 #[cfg(not(target_arch = "wasm32"))]
 impl Callstack {
@@ -815,12 +825,41 @@ impl Callstack {
         let mut frames = Vec::new();
         backtrace::trace(|frame| {
             frames.push(frame.clone());
+            true
         });
         Callstack(frames)
     }
 
     fn resolve(&self) -> Vec<MappedFrame> {
-        todo!()
+        let mut mapped_frames = Vec::new();
+        for frame in &self.0 {
+            let mut count = 0;
+            backtrace::resolve_frame(frame, |resolved| {
+                let Some(name) = resolved.name().map(|name| {
+                    let full = name.to_string();
+                    full.rsplit_once("::")
+                        .map(|(left, _hash)| left.to_string())
+                        .unwrap_or(full)
+                }) else {
+                    return;
+                };
+                let Some(path) = resolved.filename().map(|path| path.to_string_lossy()) else {
+                    return;
+                };
+                let line = resolved.lineno().map(|line| line as usize);
+                let column = resolved.colno().map(|col| col as usize);
+                let inlined = count > 0;
+                mapped_frames.push(MappedFrame::Mapped(SourceLocation {
+                    symbol: Symbol(name.replace("{{closure}}", "λ")),
+                    path: path.into_owned(),
+                    line: line.unwrap_or(0),
+                    column: column.unwrap_or(0),
+                    inlined,
+                }));
+                count += 1;
+            });
+        }
+        mapped_frames
     }
 }
 
