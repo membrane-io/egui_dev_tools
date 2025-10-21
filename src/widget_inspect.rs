@@ -406,7 +406,11 @@ impl SourceLocation {
 
     fn is_std_code(&self) -> bool {
         let crate_ = self.symbol.crate_();
-        crate_ == "core" || crate_ == "std" || crate_ == "alloc" || crate_ == "js_sys"
+        crate_ == "core"
+            || crate_ == "std"
+            || crate_ == "alloc"
+            || crate_ == "js_sys"
+            || crate_ == "backtrace"
     }
 }
 
