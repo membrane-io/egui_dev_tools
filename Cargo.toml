@@ -11,8 +11,8 @@ authors = ["Juan Campa <juan@membrane.io>"]
 path = "src/lib.rs"
 
 [dependencies]
-egui = "0.33.0"
-log = "0.4"
+egui = { path = "../crates/egui" }
+log = "~0.4"
 wasm-bindgen = "~0.2"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
