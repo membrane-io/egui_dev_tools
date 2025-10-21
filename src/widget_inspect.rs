@@ -62,12 +62,12 @@ impl Plugin for WidgetInspect {
                 // Ignore these shims
                 !location.symbol.function().contains("vtable.shim") &&
                     // Ignore non Rust code
-                    (location.path.ends_with(".rs") || config.show_js_frames) &&
+                    (location.path.ends_with(".rs") || config.show_all_frames) &&
                     // Config filters
                     (!location.is_std_code() || config.show_std_frames) &&
                     (!location.is_egui_code() || config.show_egui_frames)
             }
-            _ => true,
+            _ => config.show_all_frames,
         };
 
         // Find the last egui call after the last user code. Always include this so we know
@@ -226,12 +226,12 @@ impl Plugin for WidgetInspect {
                             config.show_egui_frames = true;
                         } else if !config.show_std_frames {
                             config.show_std_frames = true;
-                        } else if !config.show_js_frames {
-                            config.show_js_frames = true;
+                        } else if !config.show_all_frames {
+                            config.show_all_frames = true;
                         } else {
                             config.show_egui_frames = false;
                             config.show_std_frames = false;
-                            config.show_js_frames = false;
+                            config.show_all_frames = false;
                         }
                         false
                     }
@@ -293,8 +293,8 @@ pub struct Config {
     /// Whether to show std/alloc stack frames.
     show_std_frames: bool,
 
-    /// Whether to show JavaScript stack frames.
-    show_js_frames: bool,
+    /// Whether to show all other stack frames including JavaScript and unparsed frames.
+    show_all_frames: bool,
 }
 
 impl Config {
@@ -303,7 +303,7 @@ impl Config {
             file_opener,
             show_egui_frames: false,
             show_std_frames: false,
-            show_js_frames: false,
+            show_all_frames: false,
         }
     }
 }
@@ -311,9 +311,9 @@ impl Config {
 impl std::fmt::Debug for Config {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Config")
-            .field("show_egui_code", &self.show_egui_frames)
-            .field("show_std_code", &self.show_std_frames)
-            .field("show_js_code", &self.show_js_frames)
+            .field("show_egui_frames", &self.show_egui_frames)
+            .field("show_std_frames", &self.show_std_frames)
+            .field("show_all_frames", &self.show_all_frames)
             .finish()
     }
 }
@@ -324,7 +324,7 @@ impl Default for Config {
             file_opener: None,
             show_egui_frames: false,
             show_std_frames: false,
-            show_js_frames: false,
+            show_all_frames: false,
         }
     }
 }
@@ -471,32 +471,6 @@ impl WidgetInspect {
             last_top_location: None,
         }
     }
-
-    // /// Helper to lock the state
-    // pub fn write(ctx: &Context, f: impl FnOnce(&mut Self)) {
-    //     let state = ctx.data_mut(|data| {
-    //         data.get_temp_mut_or_default::<Arc<Mutex<Self>>>(Id::NULL)
-    //             .clone()
-    //     });
-    //     let mut state = state.lock();
-    //     f(&mut state);
-    // }
-
-    // // When enabled, intercept clicks and scrolls
-    // pub fn on_input(ctx: &Context, input: &mut RawInput) {
-    //     Self::write(ctx, |state| {
-    //     });
-    // }
-
-    // fn end_pass(ctx: &Context) {
-    //     Self::write(ctx, |state| {
-    //     });
-    // }
-
-    // pub fn on_widget(ctx: &Context, rect: &WidgetRect) {
-    //     Self::write(ctx, |state| {
-    //     });
-    // }
 }
 
 fn paint_info(
@@ -622,7 +596,7 @@ fn paint_info(
             "ALL",
             0.0,
             TextFormat {
-                underline: config.show_js_frames.then(|| stroke).unwrap_or_default(),
+                underline: config.show_all_frames.then(|| stroke).unwrap_or_default(),
                 ..strong_small.clone()
             },
         );
@@ -891,12 +865,17 @@ impl Callstack {
                 let Some(name) = resolved.name().map(|name| {
                     let full = name.to_string();
                     full.rsplit_once("::")
+                        .filter(|(_, hash)| {
+                            hash.starts_with("h")
+                                && hash[1..].chars().all(|c| c.is_ascii_hexdigit())
+                        })
                         .map(|(left, _hash)| left.to_string())
                         .unwrap_or(full)
                 }) else {
                     return;
                 };
                 let Some(path) = resolved.filename().map(|path| path.to_string_lossy()) else {
+                    parsed_frames.push(ParsedFrame::Failed(name));
                     return;
                 };
                 let line = resolved.lineno().map(|line| line as usize);
