@@ -5,24 +5,6 @@ use egui::epaint::{
 };
 use egui::{Align, Context, CursorIcon, Event, Id, Key, Painter, Plugin, RawInput, WidgetRect};
 
-// /// Register the widget inspect plugin. The file opener will be invoked when the user clicks on an
-// /// inspected widget and it should open the file at the given line and column if possible.
-// pub fn register(ctx: &Context, file_opener: Option<FileOpener>) {
-//     static NAME: &str = "widget_inspect";
-//     ctx.data_mut(|data| {
-//         data.insert_temp(
-//             Id::NULL,
-//             Arc::new(Mutex::new(WidgetInspect {
-//                 config: Config::new(file_opener),
-//                 ..WidgetInspect::default()
-//             })),
-//         );
-//     });
-//     ctx.on_widget(NAME, Arc::new(WidgetInspect::on_widget));
-//     ctx.on_input(NAME, Arc::new(WidgetInspect::on_input));
-//     ctx.on_end_pass(NAME, Arc::new(WidgetInspect::end_pass));
-// }
-
 impl Plugin for WidgetInspect {
     fn debug_name(&self) -> &'static str {
         "WidgetInspectPlugin"
@@ -74,10 +56,10 @@ impl Plugin for WidgetInspect {
                 // Ignore these shims
                 !location.symbol.function().contains("vtable.shim") &&
                     // Ignore non Rust code
-                    location.path.ends_with(".rs") &&
+                    (location.path.ends_with(".rs") || config.show_js_frames) &&
                     // Config filters
-                    (!location.is_std_code() || config.show_std_code) &&
-                    (!location.is_egui_code() || config.show_egui_code)
+                    (!location.is_std_code() || config.show_std_frames) &&
+                    (!location.is_egui_code() || config.show_egui_frames)
             }
             _ => true,
         };
@@ -230,13 +212,16 @@ impl Plugin for WidgetInspect {
                     } => {
                         // Three verbosity levels for now: app, egui, and std/alloc
                         let config = &mut self.config;
-                        if !config.show_egui_code {
-                            config.show_egui_code = true;
-                        } else if !config.show_std_code {
-                            config.show_std_code = true;
+                        if !config.show_egui_frames {
+                            config.show_egui_frames = true;
+                        } else if !config.show_std_frames {
+                            config.show_std_frames = true;
+                        } else if !config.show_js_frames {
+                            config.show_js_frames = true;
                         } else {
-                            config.show_egui_code = false;
-                            config.show_std_code = false;
+                            config.show_egui_frames = false;
+                            config.show_std_frames = false;
+                            config.show_js_frames = false;
                         }
                         false
                     }
@@ -278,18 +263,22 @@ pub struct Config {
     file_opener: Option<FileOpener>,
 
     /// Whether to show the egui stack frames.
-    show_egui_code: bool,
+    show_egui_frames: bool,
 
     /// Whether to show std/alloc stack frames.
-    show_std_code: bool,
+    show_std_frames: bool,
+
+    /// Whether to show JavaScript stack frames.
+    show_js_frames: bool,
 }
 
 impl Config {
     pub fn new(file_opener: Option<FileOpener>) -> Self {
         Self {
             file_opener,
-            show_egui_code: false,
-            show_std_code: false,
+            show_egui_frames: false,
+            show_std_frames: false,
+            show_js_frames: false,
         }
     }
 }
@@ -297,8 +286,9 @@ impl Config {
 impl std::fmt::Debug for Config {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Config")
-            .field("show_egui_code", &self.show_egui_code)
-            .field("show_std_code", &self.show_std_code)
+            .field("show_egui_code", &self.show_egui_frames)
+            .field("show_std_code", &self.show_std_frames)
+            .field("show_js_code", &self.show_js_frames)
             .finish()
     }
 }
@@ -307,8 +297,9 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             file_opener: None,
-            show_egui_code: false,
-            show_std_code: false,
+            show_egui_frames: false,
+            show_std_frames: false,
+            show_js_frames: false,
         }
     }
 }
@@ -565,12 +556,12 @@ fn paint_info(
     let mut header_job = LayoutJob::default();
     {
         let stroke = Stroke::new(1.0, strong_small.color);
-        header_job.append(&format!("{:?}", id), 0.0, strong_small.clone());
-        header_job.append(&format!(" | "), 0.0, weak_small.clone());
+        header_job.append(&format!("Widget "), 0.0, weak_small.clone());
         header_job.append(&format!("{index}"), 0.0, strong_small.clone());
-        header_job.append(&format!("/{count} "), 0.0, weak_small.clone());
-        header_job.append("widgets. Scroll to select | ", 0.0, weak_small.clone());
-        header_job.append("Filter: ", 0.0, weak_small.clone());
+        header_job.append(&format!(" (Id: {:?})", id), 0.0, strong_small.clone());
+        header_job.append(&format!(" of {count}"), 0.0, weak_small.clone());
+        header_job.append(". Scroll to select\n", 0.0, weak_small.clone());
+        header_job.append("Filter ", 0.0, weak_small.clone());
         header_job.append(
             "APP",
             0.0,
@@ -584,7 +575,7 @@ fn paint_info(
             "EGUI",
             0.0,
             TextFormat {
-                underline: config.show_egui_code.then(|| stroke).unwrap_or_default(),
+                underline: config.show_egui_frames.then(|| stroke).unwrap_or_default(),
                 ..strong_small.clone()
             },
         );
@@ -593,11 +584,20 @@ fn paint_info(
             "STD",
             0.0,
             TextFormat {
-                underline: config.show_std_code.then(|| stroke).unwrap_or_default(),
+                underline: config.show_std_frames.then(|| stroke).unwrap_or_default(),
                 ..strong_small.clone()
             },
         );
-        header_job.append(" TAB to cycle", 0.0, weak_small.clone());
+        header_job.append(" ", 0.0, weak_small.clone());
+        header_job.append(
+            "ALL",
+            0.0,
+            TextFormat {
+                underline: config.show_js_frames.then(|| stroke).unwrap_or_default(),
+                ..strong_small.clone()
+            },
+        );
+        header_job.append(" Cycle with Tab", 0.0, weak_small.clone());
     }
 
     // Maps a frame to a string/format to be shown on the left side
@@ -676,6 +676,26 @@ fn paint_info(
             left_job.append("\n", 0.0, left_format.clone());
             right_job.append("\n", 0.0, right_format.clone());
         }
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    if row_count == 0 {
+        left_job.append(
+            "Callstack was not available or we couldn't parse Rust symbols from it.\n",
+            0.0,
+            weak_small.clone(),
+        );
+        left_job.append(
+            "Consider setting up `wasm-stack-trace` to get proper Rust symbols.\n\n",
+            0.0,
+            weak_small.clone(),
+        );
+        left_job.append("  More info: ", 0.0, weak_small.clone());
+        left_job.append(
+            "https://github.com/membrane-io/wasm-stack-trace\n",
+            0.0,
+            strong_small.clone(),
+        );
     }
 
     let header_galley = painter.layout_job(header_job);
@@ -902,7 +922,6 @@ impl Callstack {
         stack
             .split("\n")
             .filter_map(|line| {
-                // return Some(MappedFrame::Failed(line.to_owned()));
                 let Some((_, rest)) = line.split_once(" at ") else {
                     return None;
                 };
