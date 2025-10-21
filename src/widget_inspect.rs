@@ -61,9 +61,7 @@ impl Plugin for WidgetInspect {
             ParsedFrame::Parsed(location) => {
                 // Ignore these shims
                 !location.symbol.function().contains("vtable.shim") &&
-                    // Ignore non Rust code
-                    (location.path.ends_with(".rs") || config.show_all_frames) &&
-                    // Config filters
+                    config.show_all_frames || // Show all
                     (!location.is_std_code() || config.show_std_frames) &&
                     (!location.is_egui_code() || config.show_egui_frames)
             }
@@ -939,6 +937,9 @@ impl Callstack {
                 let Some((path, rest)) = rest.split_once(":") else {
                     return Some(ParsedFrame::Failed(line.to_owned()));
                 };
+                if !path.ends_with(".rs") {
+                    return Some(ParsedFrame::Failed(line.to_owned()));
+                }
                 let Some((line, rest)) = rest.split_once(":") else {
                     return Some(ParsedFrame::Failed(line.to_owned()));
                 };
