@@ -17,6 +17,7 @@ impl Plugin for WidgetInspect {
             scroll_offset: _,
             ref mut clicked,
             ref mut widgets,
+            ref mut last_top_location,
             ref config,
         } = self;
 
@@ -26,8 +27,6 @@ impl Plugin for WidgetInspect {
             ctx.set_cursor_icon(CursorIcon::NotAllowed);
             return;
         }
-
-        ctx.set_cursor_icon(CursorIcon::PointingHand);
 
         // Read responses for all widgets under the pointer
         let mut widgets = std::mem::take(widgets)
@@ -43,16 +42,23 @@ impl Plugin for WidgetInspect {
         for (_, _, rect, layer) in widgets.iter_mut() {
             *rect = ctx.layer_transform_to_global(*layer).unwrap_or_default() * *rect;
         }
-        *selected_widget = (*selected_widget).clamp(0, widgets.len() - 1);
 
         // Sort by area. Does this help?
         widgets.sort_by_key(|(_, _, rect, _)| OrderedFloat(rect.area()));
 
+        // Reset the selected widget if the user moves the pointer to some other part of the UI
+        let top_location = widgets.first().map(|(id, _, _, _)| *id);
+        if top_location != *last_top_location {
+            *selected_widget = 0;
+            *last_top_location = top_location;
+        }
+
+        *selected_widget = (*selected_widget).clamp(0, widgets.len() - 1);
         let selected = widgets.remove(*selected_widget);
         let resolved = selected.1.resolve();
 
-        let filter_frame = |frame: &MappedFrame| match frame {
-            MappedFrame::Mapped(location) => {
+        let filter_frame = |frame: &ParsedFrame| match frame {
+            ParsedFrame::Parsed(location) => {
                 // Ignore these shims
                 !location.symbol.function().contains("vtable.shim") &&
                     // Ignore non Rust code
@@ -71,7 +77,7 @@ impl Plugin for WidgetInspect {
             .position(|frame| {
                 filter_frame(frame)
                     && match frame {
-                        MappedFrame::Mapped(location) => location.is_user_code(),
+                        ParsedFrame::Parsed(location) => location.is_user_code(),
                         _ => false,
                     }
             })
@@ -93,22 +99,26 @@ impl Plugin for WidgetInspect {
             .map(|(_, frame)| frame)
             .collect::<Vec<_>>();
 
+        if !resolved.is_empty() {
+            ctx.set_cursor_icon(CursorIcon::PointingHand);
+        }
+
         // First user code frame (where the user would want to navigate to)
         let most_significant_frame = resolved
             .iter()
             .position(|frame| match frame {
-                MappedFrame::Mapped(location) => location.is_user_code(),
+                ParsedFrame::Parsed(location) => location.is_user_code(),
                 _ => false,
             })
             .unwrap_or_default();
 
-        // Handle click to open source (first mapped frame)
+        // Handle click to open source of most significant frame
         if std::mem::take(clicked) {
             if let Some(location) =
                 resolved
                     .get(most_significant_frame)
                     .and_then(|frame| match frame {
-                        MappedFrame::Mapped(location) => Some(location),
+                        ParsedFrame::Parsed(location) => Some(location),
                         _ => None,
                     })
             {
@@ -227,11 +237,26 @@ impl Plugin for WidgetInspect {
                     }
                     Event::Key {
                         key: Key::Escape,
-                        repeat: false,
                         pressed: true,
                         ..
                     } => {
                         self.enabled = false;
+                        false
+                    }
+                    Event::Key {
+                        key: Key::J | Key::ArrowDown,
+                        pressed: true,
+                        ..
+                    } => {
+                        self.selected_widget = self.selected_widget.saturating_add(1);
+                        false
+                    }
+                    Event::Key {
+                        key: Key::K | Key::ArrowUp,
+                        pressed: true,
+                        ..
+                    } => {
+                        self.selected_widget = self.selected_widget.saturating_sub(1);
                         false
                     }
                     // Let everything else through
@@ -323,6 +348,9 @@ pub struct WidgetInspect {
 
     /// Captured callstacks for widgets under the pointer.
     widgets: Vec<(Id, Callstack)>,
+
+    /// The top location of the widget under the pointer. Used to reset the selected widget if the user moves the pointer to some other part of the UI.
+    last_top_location: Option<Id>,
 }
 
 #[derive(Debug, Clone)]
@@ -409,21 +437,21 @@ impl SourceLocation {
 /// frame of the original callstack can be mapped to multiple locations in the source code due to
 /// inlining.
 #[derive(Debug)]
-enum MappedFrame {
-    Mapped(SourceLocation),
+enum ParsedFrame {
+    Parsed(SourceLocation),
     Failed(String),
 }
 
-impl MappedFrame {
+impl ParsedFrame {
     fn is_user_code(&self) -> bool {
         match self {
-            MappedFrame::Mapped(location) => location.is_user_code(),
+            ParsedFrame::Parsed(location) => location.is_user_code(),
             _ => false,
         }
     }
     fn is_ui_add(&self) -> bool {
         match self {
-            MappedFrame::Mapped(location) => {
+            ParsedFrame::Parsed(location) => {
                 location.symbol.type_() == "Ui" && location.symbol.function() == "add"
             }
             _ => false,
@@ -440,6 +468,7 @@ impl WidgetInspect {
             scroll_offset: 0.0,
             clicked: false,
             widgets: vec![],
+            last_top_location: None,
         }
     }
 
@@ -478,7 +507,7 @@ fn paint_info(
     pointer_pos: Pos2,
     id: Id, // TODO: show Id
     rect: Rect,
-    callstack: Vec<MappedFrame>,
+    callstack: Vec<ParsedFrame>,
     most_significant_frame: usize,
 ) {
     let ctx = painter.ctx();
@@ -505,7 +534,7 @@ fn paint_info(
 
     const SELECTED_MARKER: &str = "⏺";
     const UNSELECTED_MARKER: &str = "⏺";
-    const POINTER_OFFSET: Vec2 = vec2(36.0, 0.0);
+    const POINTER_OFFSET: Vec2 = vec2(36.0, -48.0);
     const MARGIN: f32 = 8.0;
     const GAP: f32 = 4.0;
 
@@ -557,10 +586,10 @@ fn paint_info(
     {
         let stroke = Stroke::new(1.0, strong_small.color);
         header_job.append(&format!("Widget "), 0.0, weak_small.clone());
-        header_job.append(&format!("{index}"), 0.0, strong_small.clone());
-        header_job.append(&format!(" (Id: {:?})", id), 0.0, strong_small.clone());
+        header_job.append(&format!("{:?} ", id), 0.0, strong_small.clone());
+        header_job.append(&format!("#{index}"), 0.0, strong_small.clone());
         header_job.append(&format!(" of {count}"), 0.0, weak_small.clone());
-        header_job.append(". Scroll to select\n", 0.0, weak_small.clone());
+        header_job.append("     Scroll/J/K to select\n", 0.0, weak_small.clone());
         header_job.append("Filter ", 0.0, weak_small.clone());
         header_job.append(
             "APP",
@@ -597,12 +626,12 @@ fn paint_info(
                 ..strong_small.clone()
             },
         );
-        header_job.append(" Cycle with Tab", 0.0, weak_small.clone());
+        header_job.append("  Tab to cycle", 0.0, weak_small.clone());
     }
 
     // Maps a frame to a string/format to be shown on the left side
-    let left_side = |frame: &MappedFrame| match frame {
-        MappedFrame::Mapped(location) => {
+    let left_side = |frame: &ParsedFrame| match frame {
+        ParsedFrame::Parsed(location) => {
             let format = if location.is_user_code() {
                 strong.clone()
             } else {
@@ -619,15 +648,15 @@ fn paint_info(
                 format,
             )
         }
-        MappedFrame::Failed(text) => (
+        ParsedFrame::Failed(text) => (
             format!("! {}", text.chars().take(800).collect::<String>()),
             weak.clone(),
         ),
     };
 
     // Maps a frame to a string/format to be shown on the right side
-    let right_side = |frame: &MappedFrame| match frame {
-        MappedFrame::Mapped(location) => {
+    let right_side = |frame: &ParsedFrame| match frame {
+        ParsedFrame::Parsed(location) => {
             let format = if location.is_user_code() {
                 strong_small.clone()
             } else {
@@ -735,7 +764,7 @@ fn paint_info(
 
     // Paint background rects
     let bg_fill = Color32::from_black_alpha(180);
-    let bg_stroke = Stroke::new(1.0, Color32::TRANSPARENT);
+    let bg_stroke = Stroke::new(1.0, Color32::WHITE.gamma_multiply(0.1));
     painter.rect(body_rect, 0.0, bg_fill, bg_stroke, StrokeKind::Outside);
     painter.rect(header_rect, 0.0, bg_fill, bg_stroke, StrokeKind::Outside);
 
@@ -854,8 +883,8 @@ impl Callstack {
         Callstack(frames)
     }
 
-    fn resolve(&self) -> Vec<MappedFrame> {
-        let mut mapped_frames = Vec::new();
+    fn resolve(&self) -> Vec<ParsedFrame> {
+        let mut parsed_frames = Vec::new();
         for frame in &self.0 {
             let mut count = 0;
             backtrace::resolve_frame(frame, |resolved| {
@@ -873,7 +902,7 @@ impl Callstack {
                 let line = resolved.lineno().map(|line| line as usize);
                 let column = resolved.colno().map(|col| col as usize);
                 let inlined = count > 0;
-                mapped_frames.push(MappedFrame::Mapped(SourceLocation {
+                parsed_frames.push(ParsedFrame::Parsed(SourceLocation {
                     symbol: Symbol(name.replace("{{closure}}", "λ")),
                     path: path.into_owned(),
                     line: line.unwrap_or(0),
@@ -883,7 +912,7 @@ impl Callstack {
                 count += 1;
             });
         }
-        mapped_frames
+        parsed_frames
     }
 }
 
@@ -917,7 +946,7 @@ impl Callstack {
             .and_then(|stack| stack.as_string())
     }
 
-    fn resolve(&self) -> Vec<MappedFrame> {
+    fn resolve(&self) -> Vec<ParsedFrame> {
         let stack = self.raw().unwrap_or_default();
         stack
             .split("\n")
@@ -926,19 +955,19 @@ impl Callstack {
                     return None;
                 };
                 let Some((symbol, rest)) = rest.split_once(" (") else {
-                    return Some(MappedFrame::Failed(line.to_owned()));
+                    return Some(ParsedFrame::Failed(line.to_owned()));
                 };
                 let Some((path, rest)) = rest.split_once(":") else {
-                    return Some(MappedFrame::Failed(line.to_owned()));
+                    return Some(ParsedFrame::Failed(line.to_owned()));
                 };
                 let Some((line, rest)) = rest.split_once(":") else {
-                    return Some(MappedFrame::Failed(line.to_owned()));
+                    return Some(ParsedFrame::Failed(line.to_owned()));
                 };
                 let Some((column, rest)) = rest.split_once(")") else {
-                    return Some(MappedFrame::Failed(line.to_owned()));
+                    return Some(ParsedFrame::Failed(line.to_owned()));
                 };
                 let inlined = rest.contains("inlined");
-                Some(MappedFrame::Mapped(SourceLocation {
+                Some(ParsedFrame::Parsed(SourceLocation {
                     symbol: Symbol(symbol.replace("{{closure}}", "λ")),
                     path: path.to_owned(),
                     line: line.parse().unwrap_or(0),
