@@ -1,0 +1,6 @@
+
+[target.wasm32-unknown-unknown]
+rustflags = [
+    # Required so that getrandom use js_sys in wasm builds
+    '--cfg', 'getrandom_backend="wasm_js"',
+]
