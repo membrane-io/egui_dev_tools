@@ -11,12 +11,17 @@ authors = ["Juan Campa <juan@membrane.io>"]
 path = "src/lib.rs"
 
 [dependencies]
-egui = { path = "../crates/egui" }
+egui = { git = "https://github.com/emilk/egui", branch = "main" }
 log = "~0.4"
-wasm-bindgen = "~0.2"
+
+[dev-dependencies]
+egui_demo_lib = { git = "https://github.com/emilk/egui", branch = "main" }
+eframe = { git = "https://github.com/emilk/egui", branch = "main" }
+env_logger = "0.11"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 backtrace = "~0.3"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-js-sys = "~0.3"
+wasm-bindgen = "~0"
+js-sys = "~0"

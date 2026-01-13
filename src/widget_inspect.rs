@@ -3,14 +3,22 @@ use egui::epaint::{
     Color32, FontId, Stroke, StrokeKind,
     text::{LayoutJob, TextFormat},
 };
-use egui::{Align, Context, CursorIcon, Event, Id, Key, Painter, Plugin, RawInput, WidgetRect};
+use egui::{
+    Align, Context, CursorIcon, Event, Id, Key, MouseWheelUnit, Painter, Plugin, RawInput, Ui,
+    WidgetRect,
+};
+use log::info;
+
+use crate::symbol_parser::Symbol;
+use std::borrow::Cow;
 
 impl Plugin for WidgetInspect {
     fn debug_name(&self) -> &'static str {
         "WidgetInspectPlugin"
     }
 
-    fn on_end_pass(&mut self, ctx: &Context) {
+    fn on_end_pass(&mut self, ui: &mut Ui) {
+        let ctx = ui.ctx();
         let &mut Self {
             enabled,
             ref mut selected_widget,
@@ -161,6 +169,7 @@ impl Plugin for WidgetInspect {
         let pointer_pos = ctx.input(|i| i.pointer.latest_pos().unwrap_or_default());
         paint_info(
             &painter,
+            ui,
             &config,
             *selected_widget,
             count,
@@ -201,14 +210,20 @@ impl Plugin for WidgetInspect {
                         // TODO: handle touch-click
                         false
                     }
-                    Event::MouseWheel { delta, .. } => {
-                        self.scroll_offset += delta.y;
-                        if self.scroll_offset <= -4.0 {
-                            self.selected_widget = self.selected_widget.saturating_add(1);
-                            self.scroll_offset = 0.0;
-                        } else if self.scroll_offset >= 4.0 {
-                            self.selected_widget = self.selected_widget.saturating_sub(1);
-                            self.scroll_offset = 0.0;
+                    Event::MouseWheel { delta, unit, .. } => {
+                        if *unit == MouseWheelUnit::Line || *unit == MouseWheelUnit::Page {
+                            self.selected_widget = self
+                                .selected_widget
+                                .saturating_add_signed(delta.y.signum() as isize);
+                        } else {
+                            self.scroll_offset += delta.y;
+                            if self.scroll_offset <= -4.0 {
+                                self.selected_widget = self.selected_widget.saturating_add(1);
+                                self.scroll_offset = 0.0;
+                            } else if self.scroll_offset >= 4.0 {
+                                self.selected_widget = self.selected_widget.saturating_sub(1);
+                                self.scroll_offset = 0.0;
+                            }
                         }
                         false
                     }
@@ -352,50 +367,6 @@ pub struct WidgetInspect {
 }
 
 #[derive(Debug, Clone)]
-pub struct Symbol(String);
-
-impl Symbol {
-    pub fn function(&self) -> &str {
-        self.0
-            .rsplit("::")
-            .skip_while(|s| *s == "λ")
-            .next()
-            .map(|s| s.as_ptr() as usize - self.0.as_ptr() as usize)
-            .map(|offset| &self.0[offset..])
-            .unwrap_or("")
-    }
-
-    pub fn type_(&self) -> &str {
-        if self.0.starts_with("<") {
-            // Trait functions are formatted as "<mod::mod::Type as Trait>::function"
-            self.0
-                .split_once(" as ")
-                .and_then(|(left, _)| {
-                    left.rsplit("::").skip_while(|s| *s == "λ").nth(1)
-                    // .map(|s| s.as_ptr() as usize - left.as_ptr() as usize)
-                    // .map(|offset| &left[offset..])
-                })
-                .unwrap_or("")
-        } else {
-            self.0
-                .rsplit("::")
-                .skip_while(|s| *s == "λ")
-                .nth(1)
-                .unwrap_or("")
-        }
-    }
-
-    pub fn crate_(&self) -> &str {
-        self.0
-            .trim_start_matches('<')
-            .trim_start_matches("dyn ")
-            .split("::")
-            .next()
-            .unwrap_or("")
-    }
-}
-
-#[derive(Debug, Clone)]
 pub struct SourceLocation {
     pub symbol: Symbol,
     pub path: String,
@@ -416,6 +387,10 @@ impl SourceLocation {
     fn is_egui_code(&self) -> bool {
         let crate_ = self.symbol.crate_();
         crate_ == "egui"
+            || crate_ == "objc2"
+            || crate_ == "objc2_app_kit"
+            || crate_ == "winit"
+            || crate_ == "eframe"
             || crate_ == "egui_extras"
             || crate_ == "egui_tiles"
             || crate_ == "egui_dev_tools"
@@ -428,6 +403,7 @@ impl SourceLocation {
             || crate_ == "alloc"
             || crate_ == "js_sys"
             || crate_ == "backtrace"
+            || crate_ == "<unknown>"
     }
 }
 
@@ -473,6 +449,7 @@ impl WidgetInspect {
 
 fn paint_info(
     painter: &Painter,
+    ui: &Ui,
     config: &Config,
     index: usize,
     count: usize,
@@ -511,7 +488,7 @@ fn paint_info(
     const GAP: f32 = 4.0;
 
     // All text formats (could these be constants?)
-    let font = FontId::monospace(11.0);
+    let font = FontId::monospace(10.0);
     let text_color = Color32::WHITE;
     let strong = TextFormat {
         font_id: font.clone(),
@@ -610,13 +587,24 @@ fn paint_info(
                 weak.clone()
             };
             let indent = if location.inlined { "  " } else { "" };
+            let max_function_len = 64usize
+                .saturating_sub(location.symbol.type_().len())
+                .max(10);
+
+            const ELLIPSIS: &str = "…";
+            let function = if location.symbol.function().len() > max_function_len {
+                location
+                    .symbol
+                    .function()
+                    .chars()
+                    .take(max_function_len - 1)
+                    .collect::<String>()
+                    + &ELLIPSIS
+            } else {
+                location.symbol.function().to_string()
+            };
             (
-                format!(
-                    "{}{}::{}",
-                    indent,
-                    location.symbol.type_(),
-                    location.symbol.function()
-                ),
+                format!("{}{}::{}", indent, location.symbol.type_(), function,),
                 format,
             )
         }
@@ -860,27 +848,23 @@ impl Callstack {
         for frame in &self.0 {
             let mut count = 0;
             backtrace::resolve_frame(frame, |resolved| {
-                let Some(name) = resolved.name().map(|name| {
-                    let full = name.to_string();
-                    full.rsplit_once("::")
-                        .filter(|(_, hash)| {
-                            hash.starts_with("h")
-                                && hash[1..].chars().all(|c| c.is_ascii_hexdigit())
-                        })
-                        .map(|(left, _hash)| left.to_string())
-                        .unwrap_or(full)
-                }) else {
-                    return;
-                };
                 let Some(path) = resolved.filename().map(|path| path.to_string_lossy()) else {
-                    parsed_frames.push(ParsedFrame::Failed(name));
+                    parsed_frames.push(ParsedFrame::Failed(
+                        resolved
+                            .name()
+                            .map_or_else(|| "<unknown>".to_string(), |name| name.to_string()),
+                    ));
                     return;
                 };
                 let line = resolved.lineno().map(|line| line as usize);
                 let column = resolved.colno().map(|col| col as usize);
                 let inlined = count > 0;
+                let name = resolved
+                    .name()
+                    .map(|name| name.to_string())
+                    .unwrap_or_default();
                 parsed_frames.push(ParsedFrame::Parsed(SourceLocation {
-                    symbol: Symbol(name.replace("{{closure}}", "λ")),
+                    symbol: Symbol::parse(&name),
                     path: path.into_owned(),
                     line: line.unwrap_or(0),
                     column: column.unwrap_or(0),
@@ -931,9 +915,15 @@ impl Callstack {
                 let Some((_, rest)) = line.split_once(" at ") else {
                     return None;
                 };
-                let Some((symbol, rest)) = rest.split_once(" (") else {
+                let Some((symbol, rest)) = rest.rsplit_once(" (") else {
                     return Some(ParsedFrame::Failed(line.to_owned()));
                 };
+                let (symbol, inlined) = if symbol.ends_with(" [inlined]") {
+                    (symbol.trim_end_matches(" [inlined]"), true)
+                } else {
+                    (symbol, false)
+                };
+                let symbol = Symbol::parse(symbol);
                 let Some((path, rest)) = rest.split_once(":") else {
                     return Some(ParsedFrame::Failed(line.to_owned()));
                 };
@@ -946,9 +936,9 @@ impl Callstack {
                 let Some((column, rest)) = rest.split_once(")") else {
                     return Some(ParsedFrame::Failed(line.to_owned()));
                 };
-                let inlined = rest.contains("inlined");
+
                 Some(ParsedFrame::Parsed(SourceLocation {
-                    symbol: Symbol(symbol.replace("{{closure}}", "λ")),
+                    symbol,
                     path: path.to_owned(),
                     line: line.parse().unwrap_or(0),
                     column: column.parse().unwrap_or(0),
