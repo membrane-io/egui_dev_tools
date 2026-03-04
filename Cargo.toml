@@ -10,9 +10,20 @@ authors = ["Juan Campa <juan@membrane.io>"]
 [lib]
 path = "src/lib.rs"
 
+[features]
+default = ["vals", "widget-inspect"]
+vals = []
+widget-inspect = []
+
 [dependencies]
 egui = { git = "https://github.com/emilk/egui", branch = "main" }
+egui_table = "0.7"
+profiling = { version = "1" }
 log = "~0.4"
+regex = "1"
+
+[patch.crates-io]
+egui = { git = "https://github.com/emilk/egui", branch = "main" }
 
 [dev-dependencies]
 egui_demo_lib = { git = "https://github.com/emilk/egui", branch = "main" }

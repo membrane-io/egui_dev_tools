@@ -1,13 +1,164 @@
+use crate::symbol_parser::Symbol;
+use crate::{SourceLocation, open_file};
 use egui::emath::{Align2, OrderedFloat, Pos2, Rect, Vec2, vec2};
 use egui::epaint::{
   Color32, FontId, Stroke, StrokeKind,
   text::{LayoutJob, TextFormat},
 };
 use egui::{Align, Context, CursorIcon, Event, Id, Key, MouseWheelUnit, Painter, Plugin, RawInput, Ui, WidgetRect};
-use log::info;
 
-use crate::symbol_parser::Symbol;
-use std::borrow::Cow;
+pub struct Config {
+  /// Whether to show the egui stack frames.
+  show_egui_frames: bool,
+
+  /// Whether to show std/alloc stack frames.
+  show_std_frames: bool,
+
+  /// Whether to show all other stack frames including JavaScript and unparsed frames.
+  show_all_frames: bool,
+}
+
+impl Config {
+  pub fn new() -> Self {
+    Self { show_egui_frames: false, show_std_frames: false, show_all_frames: false }
+  }
+}
+
+impl std::fmt::Debug for Config {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    f.debug_struct("Config")
+      .field("show_egui_frames", &self.show_egui_frames)
+      .field("show_std_frames", &self.show_std_frames)
+      .field("show_all_frames", &self.show_all_frames)
+      .finish()
+  }
+}
+
+impl Default for Config {
+  fn default() -> Self {
+    Self { show_egui_frames: false, show_std_frames: false, show_all_frames: false }
+  }
+}
+
+#[derive(Debug, Clone)]
+pub struct ResolvedFrame {
+  pub symbol: Symbol,
+  pub inlined: bool,
+  pub location: SourceLocation,
+}
+
+impl ResolvedFrame {
+  pub fn source_location(&self) -> &SourceLocation {
+    &self.location
+  }
+}
+
+impl ResolvedFrame {
+  fn is_user_code(&self) -> bool {
+    !self.is_std_code() && !self.is_egui_code()
+  }
+
+  fn is_egui_code(&self) -> bool {
+    let crate_ = self.symbol.crate_();
+    crate_ == "egui"
+      || crate_ == "objc2"
+      || crate_ == "objc2_app_kit"
+      || crate_ == "winit"
+      || crate_ == "eframe"
+      || crate_ == "egui_extras"
+      || crate_ == "egui_tiles"
+      || crate_ == "egui_dev_tools"
+  }
+
+  fn is_std_code(&self) -> bool {
+    let crate_ = self.symbol.crate_();
+    crate_ == "core"
+      || crate_ == "std"
+      || crate_ == "alloc"
+      || crate_ == "js_sys"
+      || crate_ == "backtrace"
+      || crate_ == "<unknown>"
+  }
+}
+
+/// A callstack frame that has been mapped to a location in the source code. Note that a single
+/// frame of the original callstack can be mapped to multiple locations in the source code due to
+/// inlining.
+#[derive(Debug)]
+enum ParsedFrame {
+  Parsed(ResolvedFrame),
+  Failed(String),
+}
+
+impl ParsedFrame {
+  fn is_user_code(&self) -> bool {
+    match self {
+      ParsedFrame::Parsed(location) => location.is_user_code(),
+      _ => false,
+    }
+  }
+  fn is_ui_add(&self) -> bool {
+    match self {
+      ParsedFrame::Parsed(location) => location.symbol.type_() == "Ui" && location.symbol.function() == "add",
+      _ => false,
+    }
+  }
+}
+
+pub struct WidgetInspect {
+  /// Configuration
+  config: Config,
+
+  /// Whether the widget inspect is enabled.
+  enabled: bool,
+
+  /// The index of the selected widget. Used to navigate the callstacks with the mouse wheel.
+  selected_widget: usize,
+
+  /// The offset of the scroll wheel. Used to navigate the callstacks with the mouse wheel.
+  scroll_offset: f32,
+
+  /// Whether the user just clicked. We need to track this separately from normal
+  /// `Response::clicked` as to not interfere with normal widget interactions.
+  clicked: bool,
+
+  /// Captured callstacks for widgets under the pointer.
+  widgets: Vec<(Id, Callstack)>,
+
+  /// The top location of the widget under the pointer. Used to reset the selected widget if the user moves the pointer to some other part of the UI.
+  last_top_location: Option<Id>,
+
+  /// Frame index to open (set by number keys 1-9).
+  open_frame_index: Option<usize>,
+
+  /// Rects where this plugin last painted its overlays.
+  painted_rects: Vec<Rect>,
+}
+
+impl WidgetInspect {
+  pub fn new() -> Self {
+    Self::new_with_config(Config::default())
+  }
+
+  pub fn new_with_config(config: Config) -> Self {
+    WidgetInspect {
+      config,
+      enabled: false,
+      selected_widget: 0,
+      scroll_offset: 0.0,
+      clicked: false,
+      widgets: vec![],
+      last_top_location: None,
+      open_frame_index: None,
+      painted_rects: vec![],
+    }
+  }
+
+  /// Get the rects where this plugin last painted its overlays.
+  pub fn painted_rects(&self) -> &[Rect] {
+    &self.painted_rects
+  }
+}
 
 impl Plugin for WidgetInspect {
   fn debug_name(&self) -> &'static str {
@@ -25,6 +176,7 @@ impl Plugin for WidgetInspect {
       ref mut last_top_location,
       ref config,
       ref mut open_frame_index,
+      ref mut painted_rects,
     } = self;
 
     if !enabled {
@@ -121,19 +273,12 @@ impl Plugin for WidgetInspect {
     let frame_to_open =
       std::mem::take(open_frame_index).or_else(|| std::mem::take(clicked).then_some(most_significant_frame));
     if let Some(frame_idx) = frame_to_open {
-      if let Some(location) = resolved.get(frame_idx).and_then(|frame| match frame {
+      if let Some(frame) = resolved.get(frame_idx).and_then(|frame| match frame {
         ParsedFrame::Parsed(location) => Some(location),
         _ => None,
       }) {
-        match config.file_opener.as_ref().map(|file_opener| file_opener(ctx, location)) {
-          Some(Ok(())) => {
-            self.enabled = false;
-          }
-          Some(Err(err)) => {
-            log::error!("ERROR: opening source: {:?}", err);
-          }
-          None => {}
-        }
+        open_file(ctx, frame.source_location());
+        self.enabled = false;
       }
     }
 
@@ -160,7 +305,8 @@ impl Plugin for WidgetInspect {
     painter.rect_stroke(rect, 0.0, stroke, StrokeKind::Outside);
 
     let pointer_pos = ctx.input(|i| i.pointer.latest_pos().unwrap_or_default());
-    paint_info(&painter, ui, &config, *selected_widget, count, pointer_pos, id, rect, resolved, most_significant_frame);
+    *painted_rects =
+      paint_info(&painter, &config, *selected_widget, count, pointer_pos, id, rect, resolved, most_significant_frame);
   }
 
   fn input_hook(&mut self, input: &mut RawInput) {
@@ -333,7 +479,7 @@ impl Plugin for WidgetInspect {
     }
   }
 
-  #[cfg_attr(not(debug_assertions), expect(dead_code))]
+  #[cfg(debug_assertions)]
   fn on_widget_under_pointer(&mut self, _ctx: &Context, widget: &WidgetRect) {
     // Some widgets call `Context::create_widget` twice, once during creation and once after all of its
     // call because it's the callstack that creates it. The second call contains the final
@@ -348,154 +494,8 @@ impl Plugin for WidgetInspect {
   }
 }
 
-pub type FileOpener = Box<dyn Fn(&Context, &SourceLocation) -> Result<(), String> + Send + Sync>;
-
-pub struct Config {
-  /// How to open the source code.
-  file_opener: Option<FileOpener>,
-
-  /// Whether to show the egui stack frames.
-  show_egui_frames: bool,
-
-  /// Whether to show std/alloc stack frames.
-  show_std_frames: bool,
-
-  /// Whether to show all other stack frames including JavaScript and unparsed frames.
-  show_all_frames: bool,
-}
-
-impl Config {
-  pub fn new(file_opener: Option<FileOpener>) -> Self {
-    Self { file_opener, show_egui_frames: false, show_std_frames: false, show_all_frames: false }
-  }
-}
-
-impl std::fmt::Debug for Config {
-  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-    f.debug_struct("Config")
-      .field("show_egui_frames", &self.show_egui_frames)
-      .field("show_std_frames", &self.show_std_frames)
-      .field("show_all_frames", &self.show_all_frames)
-      .finish()
-  }
-}
-
-impl Default for Config {
-  fn default() -> Self {
-    Self { file_opener: None, show_egui_frames: false, show_std_frames: false, show_all_frames: false }
-  }
-}
-
-pub struct WidgetInspect {
-  /// Configuration
-  config: Config,
-
-  /// Whether the widget inspect is enabled.
-  enabled: bool,
-
-  /// The index of the selected widget. Used to navigate the callstacks with the mouse wheel.
-  selected_widget: usize,
-
-  /// The offset of the scroll wheel. Used to navigate the callstacks with the mouse wheel.
-  scroll_offset: f32,
-
-  /// Whether the user just clicked. We need to track this separately from normal
-  /// `Response::clicked` as to not interfere with normal widget interactions.
-  clicked: bool,
-
-  /// Captured callstacks for widgets under the pointer.
-  widgets: Vec<(Id, Callstack)>,
-
-  /// The top location of the widget under the pointer. Used to reset the selected widget if the user moves the pointer to some other part of the UI.
-  last_top_location: Option<Id>,
-
-  /// Frame index to open (set by number keys 1-9).
-  open_frame_index: Option<usize>,
-}
-
-#[derive(Debug, Clone)]
-pub struct SourceLocation {
-  pub symbol: Symbol,
-  pub path: String,
-  pub line: usize,
-  pub column: usize,
-  pub inlined: bool,
-}
-
-impl SourceLocation {
-  fn filename(&self) -> &str {
-    self.path.rsplit('/').next().unwrap_or(self.path.as_str())
-  }
-
-  fn is_user_code(&self) -> bool {
-    !self.is_std_code() && !self.is_egui_code()
-  }
-
-  fn is_egui_code(&self) -> bool {
-    let crate_ = self.symbol.crate_();
-    crate_ == "egui"
-      || crate_ == "objc2"
-      || crate_ == "objc2_app_kit"
-      || crate_ == "winit"
-      || crate_ == "eframe"
-      || crate_ == "egui_extras"
-      || crate_ == "egui_tiles"
-      || crate_ == "egui_dev_tools"
-  }
-
-  fn is_std_code(&self) -> bool {
-    let crate_ = self.symbol.crate_();
-    crate_ == "core"
-      || crate_ == "std"
-      || crate_ == "alloc"
-      || crate_ == "js_sys"
-      || crate_ == "backtrace"
-      || crate_ == "<unknown>"
-  }
-}
-
-/// A callstack frame that has been mapped to a location in the source code. Note that a single
-/// frame of the original callstack can be mapped to multiple locations in the source code due to
-/// inlining.
-#[derive(Debug)]
-enum ParsedFrame {
-  Parsed(SourceLocation),
-  Failed(String),
-}
-
-impl ParsedFrame {
-  fn is_user_code(&self) -> bool {
-    match self {
-      ParsedFrame::Parsed(location) => location.is_user_code(),
-      _ => false,
-    }
-  }
-  fn is_ui_add(&self) -> bool {
-    match self {
-      ParsedFrame::Parsed(location) => location.symbol.type_() == "Ui" && location.symbol.function() == "add",
-      _ => false,
-    }
-  }
-}
-
-impl WidgetInspect {
-  pub fn new(config: Config) -> Self {
-    WidgetInspect {
-      config,
-      enabled: false,
-      selected_widget: 0,
-      scroll_offset: 0.0,
-      clicked: false,
-      widgets: vec![],
-      last_top_location: None,
-      open_frame_index: None,
-    }
-  }
-}
-
 fn paint_info(
   painter: &Painter,
-  ui: &Ui,
   config: &Config,
   index: usize,
   count: usize,
@@ -504,11 +504,11 @@ fn paint_info(
   rect: Rect,
   callstack: Vec<ParsedFrame>,
   most_significant_frame: usize,
-) {
+) -> Vec<Rect> {
   let ctx = painter.ctx();
 
   // Print width and height:
-  let text_color = if ctx.style().visuals.dark_mode { Color32::WHITE } else { Color32::BLACK };
+  let text_color = if ctx.global_style().visuals.dark_mode { Color32::WHITE } else { Color32::BLACK };
   painter.debug_text(
     rect.left_center() + 4.0 * Vec2::LEFT,
     Align2::RIGHT_CENTER,
@@ -616,9 +616,10 @@ fn paint_info(
 
   // Maps a frame to a string/format to be shown on the right side
   let right_side = |frame: &ParsedFrame| match frame {
-    ParsedFrame::Parsed(location) => {
-      let format = if location.is_user_code() { strong_small.clone() } else { weak_small.clone() };
-      (format!(" {}/{}:{}", location.symbol.crate_(), location.filename(), location.line,), format)
+    ParsedFrame::Parsed(resolved) => {
+      let format = if resolved.is_user_code() { strong_small.clone() } else { weak_small.clone() };
+      let location = resolved.source_location();
+      (format!(" {}/{}:{}", resolved.symbol.crate_(), location.filename(), location.line,), format)
     }
     _ => ("-".to_string(), weak.clone()),
   };
@@ -718,6 +719,8 @@ fn paint_info(
   painter.galley(right_rect.left_top() + Vec2::splat(MARGIN), right_galley, text_color);
 
   painter.galley(header_rect.left_top() + Vec2::splat(MARGIN), header_galley, text_color);
+
+  vec![header_rect, body_rect]
 }
 
 /// Given a list of rects, cut a hole in them. In other words, any rect that intersects with the hole is replaced with
@@ -807,11 +810,9 @@ impl Callstack {
         let column = resolved.colno().map(|col| col as usize);
         let inlined = count > 0;
         let name = resolved.name().map(|name| name.to_string()).unwrap_or_default();
-        parsed_frames.push(ParsedFrame::Parsed(SourceLocation {
+        parsed_frames.push(ParsedFrame::Parsed(ResolvedFrame {
           symbol: Symbol::parse(&name),
-          path: path.into_owned(),
-          line: line.unwrap_or(0),
-          column: column.unwrap_or(0),
+          location: SourceLocation { path: path.into_owned(), line: line.unwrap_or(0), column: column.unwrap_or(0) },
           inlined,
         }));
         count += 1;
@@ -872,15 +873,17 @@ impl Callstack {
         let Some((line, rest)) = rest.split_once(":") else {
           return Some(ParsedFrame::Failed(line.to_owned()));
         };
-        let Some((column, rest)) = rest.split_once(")") else {
+        let Some((column, _rest)) = rest.split_once(")") else {
           return Some(ParsedFrame::Failed(line.to_owned()));
         };
 
-        Some(ParsedFrame::Parsed(SourceLocation {
+        Some(ParsedFrame::Parsed(ResolvedFrame {
           symbol,
-          path: path.to_owned(),
-          line: line.parse().unwrap_or(0),
-          column: column.parse().unwrap_or(0),
+          location: SourceLocation {
+            path: path.to_owned(),
+            line: line.parse().unwrap_or(0),
+            column: column.parse().unwrap_or(0),
+          },
           inlined,
         }))
       })
