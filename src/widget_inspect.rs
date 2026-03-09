@@ -16,11 +16,14 @@ pub struct Config {
 
   /// Whether to show all other stack frames including JavaScript and unparsed frames.
   show_all_frames: bool,
+
+  /// When true, only widgets that sense clicks are considered.
+  clickable_only: bool,
 }
 
 impl Config {
   pub fn new() -> Self {
-    Self { show_egui_frames: false, show_std_frames: false, show_all_frames: false }
+    Self { show_egui_frames: false, show_std_frames: false, show_all_frames: false, clickable_only: false }
   }
 }
 
@@ -30,13 +33,14 @@ impl std::fmt::Debug for Config {
       .field("show_egui_frames", &self.show_egui_frames)
       .field("show_std_frames", &self.show_std_frames)
       .field("show_all_frames", &self.show_all_frames)
+      .field("clickable_only", &self.clickable_only)
       .finish()
   }
 }
 
 impl Default for Config {
   fn default() -> Self {
-    Self { show_egui_frames: false, show_std_frames: false, show_all_frames: false }
+    Self { show_egui_frames: false, show_std_frames: false, show_all_frames: false, clickable_only: false }
   }
 }
 
@@ -363,6 +367,10 @@ impl Plugin for WidgetInspect {
             }
             false
           }
+          Event::Key { key: Key::Space, pressed: true, .. } => {
+            self.config.clickable_only = !self.config.clickable_only;
+            false
+          }
           Event::Key { key: Key::Escape, pressed: true, .. } => {
             self.enabled = false;
             false
@@ -481,6 +489,9 @@ impl Plugin for WidgetInspect {
 
   #[cfg(debug_assertions)]
   fn on_widget_under_pointer(&mut self, _ctx: &Context, widget: &WidgetRect) {
+    if self.config.clickable_only && !widget.sense.senses_click() {
+      return;
+    }
     // Some widgets call `Context::create_widget` twice, once during creation and once after all of its
     // call because it's the callstack that creates it. The second call contains the final
     // rect but it doesn't matter since we get it at the end of the frame directly from
@@ -573,7 +584,7 @@ fn paint_info(
     header_job.append(&format!("#{index}"), 0.0, strong_small.clone());
     header_job.append(&format!(" of {count}"), 0.0, weak_small.clone());
     header_job.append("     Scroll or ↑↓ to select\n", 0.0, weak_small.clone());
-    header_job.append("Filter ", 0.0, weak_small.clone());
+    header_job.append("Source ", 0.0, weak_small.clone());
     header_job.append("APP", 0.0, TextFormat { underline: stroke, ..strong_small.clone() });
     header_job.append(" ", 0.0, weak_small.clone());
     header_job.append(
@@ -593,7 +604,20 @@ fn paint_info(
       0.0,
       TextFormat { underline: config.show_all_frames.then(|| stroke).unwrap_or_default(), ..strong_small.clone() },
     );
-    header_job.append("  Tab to cycle", 0.0, weak_small.clone());
+    header_job.append("  Tab to cycle\n", 0.0, weak_small.clone());
+    header_job.append("Sense  ", 0.0, weak_small.clone());
+    header_job.append(
+      "CLICK",
+      0.0,
+      TextFormat { underline: config.clickable_only.then(|| stroke).unwrap_or_default(), ..strong_small.clone() },
+    );
+    header_job.append(" ", 0.0, weak_small.clone());
+    header_job.append(
+      "ANY",
+      0.0,
+      TextFormat { underline: (!config.clickable_only).then(|| stroke).unwrap_or_default(), ..strong_small.clone() },
+    );
+    header_job.append("  Space to toggle", 0.0, weak_small.clone());
   }
 
   // Maps a frame to a string/format to be shown on the left side
