@@ -391,7 +391,7 @@ pub struct WidgetInspect {
   config: Config,
 
   /// Whether the widget inspect is enabled.
-  enabled: bool,
+  pub enabled: bool,
 
   /// The index of the selected widget. Used to navigate the callstacks with the mouse wheel.
   selected_widget: usize,
