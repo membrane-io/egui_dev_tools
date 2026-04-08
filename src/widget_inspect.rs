@@ -114,7 +114,7 @@ pub struct WidgetInspect {
   config: Config,
 
   /// Whether the widget inspect is enabled.
-  enabled: bool,
+  pub enabled: bool,
 
   /// The index of the selected widget. Used to navigate the callstacks with the mouse wheel.
   selected_widget: usize,
@@ -184,6 +184,7 @@ impl Plugin for WidgetInspect {
     } = self;
 
     if !enabled {
+      painted_rects.clear();
       return;
     } else if widgets.is_empty() {
       ctx.set_cursor_icon(CursorIcon::NotAllowed);
@@ -625,7 +626,7 @@ fn paint_info(
     ParsedFrame::Parsed(location) => {
       let format = if location.is_user_code() { strong.clone() } else { weak.clone() };
       let indent = if location.inlined { "  " } else { "" };
-      let max_function_len = 64usize.saturating_sub(location.symbol.type_().len()).max(10);
+      let max_function_len = 256usize.saturating_sub(location.symbol.type_().len()).max(10);
 
       const ELLIPSIS: &str = "…";
       let function = if location.symbol.function().len() > max_function_len {
@@ -888,6 +889,9 @@ impl Callstack {
         let (symbol, inlined) =
           if symbol.ends_with(" [inlined]") { (symbol.trim_end_matches(" [inlined]"), true) } else { (symbol, false) };
         let symbol = Symbol::parse(symbol);
+        if symbol.type_() == "<unknown-type>" {
+          return Some(ParsedFrame::Failed(line.to_owned()));
+        }
         let Some((path, rest)) = rest.split_once(":") else {
           return Some(ParsedFrame::Failed(line.to_owned()));
         };
