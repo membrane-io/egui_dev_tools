@@ -14,9 +14,11 @@ path = "src/lib.rs"
 default = ["vals", "widget-inspect"]
 vals = []
 widget-inspect = []
+logging = ["dep:egui_tracing"]
 
 [dependencies]
 egui = { git = "https://github.com/emilk/egui", branch = "main" }
+egui_tracing = { path = "../egui_tracing", default-features = false, features = ["log", "wasmbind"], optional = true }
 egui_table = "0.7"
 profiling = { version = "1" }
 log = "~0.4"
