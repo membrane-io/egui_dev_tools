@@ -1,14 +1,15 @@
 use egui::{
-  Button, CollapsingHeader, Context, DragValue, Label, Rangef, Response, RichText, ScrollArea, TextEdit, TextStyle, Ui,
-  Widget,
+  Button, Context, DragValue, FontId, Label, Painter, Rangef, Response, RichText, Sense, Stroke, TextEdit, TextStyle,
+  Ui, Widget,
+  collapsing_header::paint_default_icon,
   emath::{Pos2, Rect, TSTransform, Vec2},
-  epaint::Color32,
+  epaint::{Color32, Shape},
   plugin::{Plugin, TypedPluginHandle},
   vec2,
 };
 use egui_table::{AutoSizeMode, CellInfo, Column, HeaderCellInfo, Table, TableDelegate};
 use regex::Regex;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::OnceLock;
 use std::{any::Any, ops::Range};
 
@@ -18,6 +19,130 @@ pub use egui::Id;
 
 pub const KEY_DELIMITER: &str = "/";
 const HIERARCHY_INDENT: f32 = 8.0;
+
+const PLACED_PALETTE: [Color32; 8] = [
+  Color32::from_rgb(255, 80, 80),
+  Color32::from_rgb(80, 200, 255),
+  Color32::from_rgb(100, 255, 100),
+  Color32::from_rgb(255, 200, 50),
+  Color32::from_rgb(220, 120, 255),
+  Color32::from_rgb(255, 150, 60),
+  Color32::from_rgb(80, 255, 220),
+  Color32::from_rgb(255, 100, 180),
+];
+
+fn placed_dot_color(prefix: &str) -> Color32 {
+  let hash = prefix.bytes().fold(0u32, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u32));
+  PLACED_PALETTE[hash as usize % PLACED_PALETTE.len()]
+}
+
+const LABEL_FONT: FontId = FontId::monospace(9.0);
+const LABEL_BG: Color32 = Color32::from_black_alpha(200);
+const LABEL_PADDING: f32 = 2.0;
+const TRIANGLE_SIZE: f32 = 6.0;
+
+pub struct LabelPlacer {
+  occupied: Vec<Rect>,
+}
+
+impl LabelPlacer {
+  pub fn new() -> Self {
+    Self { occupied: Vec::new() }
+  }
+
+  /// Find a position for a label of `size` near `anchor_rect`, avoiding overlap with
+  /// previously placed labels. Returns `(label_min_pos, triangle_tip)` where `triangle_tip`
+  /// is the point on `anchor_rect` the triangle points towards.
+  pub fn place(&mut self, anchor_rect: Rect, label_size: Vec2) -> (Pos2, Pos2) {
+    let padded = label_size + vec2(LABEL_PADDING * 2.0, LABEL_PADDING * 2.0);
+    let gap = TRIANGLE_SIZE + 2.0;
+    let cy = padded.y * 0.5;
+
+    let candidates = [
+      // Right side of rect, label to the right
+      // Right side of rect, label to the right
+      (anchor_rect.right_center() + vec2(gap, -cy), anchor_rect.right_center()),
+      (anchor_rect.right_top() + vec2(gap, 0.0), anchor_rect.right_top()),
+      (anchor_rect.right_bottom() + vec2(gap, -padded.y), anchor_rect.right_bottom()),
+      // Left side of rect, label to the left
+      (anchor_rect.left_center() - vec2(padded.x + gap, cy), anchor_rect.left_center()),
+      (anchor_rect.left_top() - vec2(padded.x + gap, 0.0), anchor_rect.left_top()),
+      (anchor_rect.left_bottom() - vec2(padded.x + gap, padded.y), anchor_rect.left_bottom()),
+      // Center top (label above, points tip down)
+      (anchor_rect.center_top() - vec2(padded.x * 0.5, padded.y + gap), anchor_rect.center_top()),
+      // Center bottom (label below, points tip up)
+      (anchor_rect.center_bottom() + vec2(-padded.x * 0.5, gap), anchor_rect.center_bottom()),
+    ];
+
+    let mut best = candidates[0];
+    let mut best_overlap = f32::MAX;
+
+    for (pos, tip) in &candidates {
+      let candidate_rect = Rect::from_min_size(*pos, padded);
+      let overlap: f32 = self.occupied.iter().map(|r| overlap_area(*r, candidate_rect)).sum();
+      if overlap < best_overlap {
+        best_overlap = overlap;
+        best = (*pos, *tip);
+        if overlap == 0.0 {
+          break;
+        }
+      }
+    }
+
+    let final_rect = Rect::from_min_size(best.0, padded);
+    self.occupied.push(final_rect);
+    best
+  }
+}
+
+fn placed_prefixes_from(plugin: &DebugValsPlugin) -> Vec<String> {
+  let mut prefixes = BTreeSet::new();
+  for (val_id, _) in &plugin.placed {
+    if let Some(entry) = plugin.values.get(val_id) {
+      let key = entry.metadata.display_label();
+      let prefix = key.split_once(KEY_DELIMITER).map_or(key, |(p, _)| p);
+      prefixes.insert(prefix.to_string());
+    }
+  }
+  prefixes.into_iter().collect()
+}
+
+fn overlap_area(a: Rect, b: Rect) -> f32 {
+  let x = (a.max.x.min(b.max.x) - a.min.x.max(b.min.x)).max(0.0);
+  let y = (a.max.y.min(b.max.y) - a.min.y.max(b.min.y)).max(0.0);
+  x * y
+}
+
+fn paint_placed_label(painter: &Painter, label_pos: Pos2, tip: Pos2, key_segment: &str, value: &str, color: Color32) {
+  let dim = Color32::from_rgb(160, 160, 160);
+  let key_galley = painter.layout_no_wrap(format!("{key_segment} "), LABEL_FONT, dim);
+  let val_galley = painter.layout_no_wrap(value.to_string(), LABEL_FONT, Color32::WHITE);
+  let key_width = key_galley.size().x;
+  let total_size = vec2(key_width + val_galley.size().x, key_galley.size().y.max(val_galley.size().y));
+
+  let text_pos = label_pos + vec2(LABEL_PADDING, LABEL_PADDING);
+  let frame_rect = Rect::from_min_size(label_pos, total_size + vec2(LABEL_PADDING * 2.0, LABEL_PADDING * 2.0));
+
+  painter.add(Shape::rect_filled(frame_rect, 2.0, LABEL_BG));
+  painter.galley(text_pos, key_galley, dim);
+  painter.galley(text_pos + vec2(key_width, 0.0), val_galley, Color32::WHITE);
+
+  let edge_centers = [
+    frame_rect.left_center(),
+    frame_rect.right_center(),
+    frame_rect.center_top(),
+    frame_rect.center_bottom(),
+  ];
+  let base = *edge_centers.iter().min_by(|a, b| a.distance(tip).total_cmp(&b.distance(tip))).unwrap();
+  let along = (tip - base).normalized();
+  let perp = vec2(-along.y, along.x);
+  let half = TRIANGLE_SIZE * 0.5;
+  painter.add(Shape::convex_polygon(
+    vec![tip, base + perp * half, base - perp * half],
+    color,
+    Stroke::new(1.0, Color32::BLACK),
+  ));
+}
 
 static PLUGIN_HANDLE: OnceLock<TypedPluginHandle<DebugValsPlugin>> = OnceLock::new();
 
@@ -91,6 +216,9 @@ pub trait DebugVal: Any + Send + Sync {
   /// Render only the value control (e.g. DragValue, checkbox) without label or source button.
   fn render_value_ui(&mut self, _ui: &mut Ui, _metadata: &DebugValMetadata, _params: &ValParams) {}
 
+  /// Return a short string representation of the current value.
+  fn display_value(&self) -> String;
+
   /// Clone this value into a boxed trait object.
   fn clone_boxed(&self) -> Box<dyn DebugVal>;
 
@@ -116,6 +244,8 @@ pub struct DebugValsPlugin {
   ctx: Option<Context>,
   show_app_controlled: bool,
   hidden_key_prefix_filter: String,
+  placed: Vec<(Id, Id)>,
+  shown_placed_prefixes: BTreeSet<String>,
 }
 
 impl DebugValsPlugin {
@@ -134,6 +264,8 @@ impl DebugValsPlugin {
       ctx: None,
       show_app_controlled: false,
       hidden_key_prefix_filter: String::new(),
+      placed: Vec::new(),
+      shown_placed_prefixes: BTreeSet::new(),
     }
   }
 
@@ -284,10 +416,55 @@ impl Plugin for DebugValsPlugin {
     }
     self.ctx = Some(ctx.clone());
   }
+
+  fn on_end_pass(&mut self, ui: &mut Ui) {
+    let placed = std::mem::take(&mut self.placed);
+    if self.shown_placed_prefixes.is_empty() {
+      return;
+    }
+    let ctx = ui.ctx();
+    let painter = ctx.debug_painter();
+    let mut placer = LabelPlacer::new();
+
+    for (val_id, widget_id) in &placed {
+      let prefix = self
+        .values
+        .get(val_id)
+        .map(|e| {
+          let key = e.metadata.display_label();
+          key.split_once(KEY_DELIMITER).map_or(key, |(p, _)| p).to_string()
+        })
+        .unwrap_or_default();
+
+      if !self.shown_placed_prefixes.contains(&prefix) {
+        continue;
+      }
+
+      if let Some(response) = ctx.read_response(*widget_id) {
+        let mut rect = response.rect;
+        if let Some(transform) = ctx.layer_transform_to_global(response.layer_id) {
+          rect = transform * rect;
+        }
+
+        let (key_segment, value_str, color) = if let Some(entry) = self.values.get(val_id) {
+          let key = entry.metadata.display_label();
+          let last = key.rsplit_once(KEY_DELIMITER).map_or(key, |(_, last)| last);
+          (last.to_string(), entry.value.display_value(), placed_dot_color(&prefix))
+        } else {
+          (format!("{val_id:?}"), String::new(), PLACED_PALETTE[0])
+        };
+
+        let combined = format!("{key_segment} {value_str}");
+        let galley_size = painter.layout_no_wrap(combined, LABEL_FONT, Color32::WHITE).size();
+        let (label_pos, tip) = placer.place(rect, galley_size);
+        paint_placed_label(&painter, label_pos, tip, &key_segment, &value_str, color);
+      }
+    }
+  }
 }
 
 /// A handle to a debug value that writes back on drop.
-pub struct ValHandle<T: Clone + Default + DebugVal> {
+pub struct ValHandle<T: Clone + DebugVal> {
   id: Id,
   metadata: DebugValMetadata,
   params: ValParams,
@@ -306,6 +483,12 @@ impl<T: Clone + Default + DebugVal + 'static> ValHandle<T> {
 
     Self { id, metadata, params, value }
   }
+}
+
+impl<T: Clone + DebugVal + 'static> ValHandle<T> {
+  pub fn set(&mut self, val: T) {
+    self.value = val;
+  }
 
   pub fn with_default(id: Id, metadata: DebugValMetadata, params: ValParams, default: impl Into<T>) -> Self {
     let id = Id::new(metadata.custom_key.as_deref().unwrap_or(metadata.file_line_col));
@@ -319,9 +502,16 @@ impl<T: Clone + Default + DebugVal + 'static> ValHandle<T> {
 
     Self { id, metadata, params, value }
   }
+
+  pub fn place(self, ui: &Ui) -> Self {
+    if let Some(handle) = PLUGIN_HANDLE.get() {
+      handle.lock().placed.push((self.id, ui.unique_id()));
+    }
+    self
+  }
 }
 
-impl<T: Clone + Default + DebugVal> std::ops::Deref for ValHandle<T> {
+impl<T: Clone + DebugVal> std::ops::Deref for ValHandle<T> {
   type Target = T;
 
   fn deref(&self) -> &Self::Target {
@@ -329,13 +519,13 @@ impl<T: Clone + Default + DebugVal> std::ops::Deref for ValHandle<T> {
   }
 }
 
-impl<T: Clone + Default + DebugVal> std::ops::DerefMut for ValHandle<T> {
+impl<T: Clone + DebugVal> std::ops::DerefMut for ValHandle<T> {
   fn deref_mut(&mut self) -> &mut Self::Target {
     &mut self.value
   }
 }
 
-impl<T: Clone + Default + DebugVal + 'static> Drop for ValHandle<T> {
+impl<T: Clone + DebugVal + 'static> Drop for ValHandle<T> {
   fn drop(&mut self) {
     if let Some(handle) = PLUGIN_HANDLE.get() {
       let mut guard = handle.lock();
@@ -438,6 +628,9 @@ macro_rules! val {
 
 /// Get a mutable debug value handle. Uses file/line/column as key if no custom key provided.
 /// Returns a `ValHandle<T>` that can be modified and writes back on drop.
+/// ```ignore
+/// let speed = val_mut!(bool, "speed", min = 0.0, max = 1.0).place(ui);
+/// ```
 #[macro_export]
 macro_rules! val_mut {
   ($ty:ty) => {{
@@ -678,9 +871,30 @@ impl Widget for DebugValues {
           ui.horizontal(|ui| {
             ui.strong("Debug Vals");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-              let response =
-                ui.checkbox(&mut plugin.show_app_controlled, "👁").on_hover_text("Show app-controlled values");
-              if response.changed() {
+              let placed_prefixes = placed_prefixes_from(&plugin);
+              let placed_count = plugin.placed.len();
+              let caption = format!("Placed {placed_count}");
+              egui::ComboBox::from_id_salt("placed_prefixes_dropdown")
+                .selected_text(caption)
+                .show_ui(ui, |ui| {
+                  for prefix in &placed_prefixes {
+                    let color = placed_dot_color(prefix);
+                    let mut enabled = plugin.shown_placed_prefixes.contains(prefix);
+                    ui.horizontal(|ui| {
+                      let (dot_rect, _) = ui.allocate_exact_size(vec2(8.0, 8.0), egui::Sense::empty());
+                      ui.painter().circle_filled(dot_rect.center(), 3.0, color);
+                      if ui.toggle_value(&mut enabled, prefix.as_str()).changed() {
+                        if enabled {
+                          plugin.shown_placed_prefixes.insert(prefix.clone());
+                        } else {
+                          plugin.shown_placed_prefixes.remove(prefix);
+                        }
+                      }
+                    });
+                  }
+                });
+
+              if ui.toggle_value(&mut plugin.show_app_controlled, "Muts").changed() {
                 plugin.persist_show_app_controlled(ui.ctx());
               }
 
@@ -752,16 +966,42 @@ impl Widget for DebugValues {
           root.insert(segments, *id);
         }
 
-        let table_opts = TableOptions {
-          can_navigate: self.can_navigate,
-          striped: self.striped,
-          resizable_columns: self.resizable_columns,
-        };
-        ui.vertical(|ui| {
-          ScrollArea::vertical().show(ui, |ui| {
-            render_tree(ui, &root, &mut plugin, &table_opts, self.compact);
-          });
-        });
+        let mut flat_rows = Vec::new();
+        flatten_tree(&root, 0, "", ui.ctx(), &mut flat_rows);
+
+        if !flat_rows.is_empty() {
+          let interact_height = ui.spacing().interact_size.y;
+          let btn_col_width = interact_height + 2.0;
+          let available = ui.available_width();
+          let reserved = if self.can_navigate { btn_col_width } else { 0.0 };
+          let name_col_width = (available * 0.35).clamp(60.0, 300.0);
+          let value_col_width = (available - name_col_width - reserved).max(60.0);
+
+          let mut columns = vec![
+            Column::new(name_col_width).resizable(self.resizable_columns).range(Rangef::new(40.0, 400.0)),
+            Column::new(value_col_width).resizable(self.resizable_columns).range(Rangef::new(40.0, f32::INFINITY)),
+          ];
+          if self.can_navigate {
+            columns
+              .push(Column::new(btn_col_width).resizable(false).range(Rangef::new(btn_col_width, btn_col_width)));
+          }
+
+          let auto_size = if self.compact { AutoSizeMode::Never } else { AutoSizeMode::Always };
+          let num_rows = flat_rows.len() as u64;
+          let mut delegate = ValsTableDelegate {
+            rows: &flat_rows,
+            plugin: &mut plugin,
+            interact_height,
+            striped: self.striped,
+          };
+          Table::new()
+            .id_salt("__vals_table")
+            .num_rows(num_rows)
+            .columns(columns)
+            .headers(vec![])
+            .auto_size_mode(auto_size)
+            .show(ui, &mut delegate);
+        }
       } else if self.show_empty_message {
         ui.label("DebugVals plugin not initialized");
       }
@@ -798,127 +1038,131 @@ impl<'a> TreeNode<'a> {
   }
 }
 
+enum FlatRow {
+  Section { name: String, depth: usize, id: Id },
+  Leaf { name: String, val_id: Id, depth: usize },
+}
+
+fn flatten_tree(node: &TreeNode<'_>, depth: usize, path: &str, ctx: &Context, out: &mut Vec<FlatRow>) {
+  for (name, child) in &node.branches {
+    let section_path = if path.is_empty() { name.to_string() } else { format!("{path}/{name}") };
+    let section_id = Id::new("__vals_section").with(&section_path);
+    out.push(FlatRow::Section { name: name.to_string(), depth, id: section_id });
+
+    let expanded = ctx.data_mut(|data| data.get_persisted::<bool>(section_id)).unwrap_or(true);
+    if expanded {
+      flatten_tree(child, depth + 1, &section_path, ctx, out);
+    }
+  }
+
+  for (name, id) in &node.leaves {
+    out.push(FlatRow::Leaf { name: name.to_string(), val_id: *id, depth });
+  }
+}
+
 struct ValsTableDelegate<'a> {
-  leaves: &'a [(String, Id)],
+  rows: &'a [FlatRow],
   plugin: &'a mut DebugValsPlugin,
   interact_height: f32,
-  can_navigate: bool,
   striped: bool,
+}
+
+impl ValsTableDelegate<'_> {
+  fn toggle_section(&self, ui: &Ui, section_id: Id) {
+    let expanded = ui.ctx().data_mut(|data| data.get_persisted::<bool>(section_id)).unwrap_or(true);
+    ui.ctx().data_mut(|data| data.insert_persisted(section_id, !expanded));
+    ui.ctx().request_repaint();
+  }
 }
 
 impl TableDelegate for ValsTableDelegate<'_> {
   fn default_row_height(&self) -> f32 {
-    self.interact_height + 1.0 // 1.0 to separate intractive controls vertically
+    self.interact_height + 1.0
   }
 
   fn header_cell_ui(&mut self, _ui: &mut Ui, _cell: &HeaderCellInfo) {}
 
   fn row_ui(&mut self, ui: &mut Ui, row_nr: u64) {
-    if self.striped && row_nr % 2 == 1 {
-      ui.painter().rect_filled(ui.available_rect_before_wrap(), 0.0, ui.visuals().faint_bg_color);
+    let row = &self.rows[row_nr as usize];
+    match row {
+      FlatRow::Section { .. } => {
+        ui.painter().rect_filled(ui.available_rect_before_wrap(), 0.0, ui.visuals().faint_bg_color);
+      }
+      FlatRow::Leaf { .. } => {
+        if self.striped && row_nr % 2 == 1 {
+          ui.painter().rect_filled(ui.available_rect_before_wrap(), 0.0, ui.visuals().faint_bg_color);
+        }
+      }
     }
   }
 
   fn cell_ui(&mut self, ui: &mut Ui, cell: &CellInfo) {
-    let (leaf_name, id) = &self.leaves[cell.row_nr as usize];
-    if let Some(entry) = self.plugin.values.get_mut(id) {
-      let metadata = DebugValMetadata {
-        file_line_col: entry.metadata.file_line_col,
-        module_path: entry.metadata.module_path,
-        custom_key: Some(leaf_name.clone()),
-        app_controlled: entry.metadata.app_controlled,
-      };
-      match cell.col_nr {
-        0 => {
-          let label = Label::new(metadata.display_label()).truncate();
-          ui.add(label).on_hover_text(metadata.file_line_col);
-        }
-        1 => {
-          ui.add_space(2.0);
-          ui.spacing_mut().item_spacing = vec2(1.0, 1.0);
-          entry.value.render_value_ui(ui, &metadata, &entry.params);
-          if !entry.metadata.app_controlled {
-            entry.value.save_persisted(ui.ctx(), *id);
+    let row = &self.rows[cell.row_nr as usize];
+    match row {
+      FlatRow::Section { name, depth, id } => {
+        if cell.col_nr == 0 {
+          let indent = *depth as f32 * HIERARCHY_INDENT;
+          ui.add_space(indent);
+
+          let expanded = ui.ctx().data_mut(|data| data.get_persisted::<bool>(*id)).unwrap_or(true);
+          let openness = ui.ctx().animate_bool(*id, expanded);
+
+          let icon_size = Vec2::splat(self.interact_height * 0.6);
+          let (_, icon_response) = ui.allocate_exact_size(icon_size, Sense::click());
+          paint_default_icon(ui, openness, &icon_response);
+
+          let label_response = ui.add(Label::new(RichText::new(name).strong()).truncate());
+
+          if icon_response.clicked() || label_response.clicked() {
+            self.toggle_section(ui, *id);
           }
         }
-        2 => {
-          ui.add_space(1.0);
-          if ui
-            .add(
-              Button::new(RichText::new("{}").monospace().size(10.0))
-                .min_size(Vec2::splat(self.interact_height))
-                .frame(false)
-                .frame_when_inactive(false),
-            )
-            .on_hover_text(metadata.file_line_col)
-            .clicked()
-          {
-            let source = SourceLocation { path: metadata.file_line_col.to_string(), line: 0, column: 0 };
-            open_file(ui.ctx(), &source);
+      }
+      FlatRow::Leaf { name, val_id, depth } => {
+        if let Some(entry) = self.plugin.values.get_mut(val_id) {
+          let metadata = DebugValMetadata {
+            file_line_col: entry.metadata.file_line_col,
+            module_path: entry.metadata.module_path,
+            custom_key: Some(name.clone()),
+            app_controlled: entry.metadata.app_controlled,
+          };
+          match cell.col_nr {
+            0 => {
+              let indent = *depth as f32 * HIERARCHY_INDENT;
+              ui.add_space(indent);
+              let label = Label::new(metadata.display_label()).truncate();
+              ui.add(label).on_hover_text(metadata.file_line_col);
+            }
+            1 => {
+              ui.add_space(2.0);
+              ui.spacing_mut().item_spacing = vec2(1.0, 1.0);
+              entry.value.render_value_ui(ui, &metadata, &entry.params);
+              if !entry.metadata.app_controlled {
+                entry.value.save_persisted(ui.ctx(), *val_id);
+              }
+            }
+            2 => {
+              ui.add_space(1.0);
+              if ui
+                .add(
+                  Button::new(RichText::new("{}").monospace().size(10.0))
+                    .min_size(Vec2::splat(self.interact_height))
+                    .frame(false)
+                    .frame_when_inactive(false),
+                )
+                .on_hover_text(metadata.file_line_col)
+                .clicked()
+              {
+                let source = SourceLocation { path: metadata.file_line_col.to_string(), line: 0, column: 0 };
+                open_file(ui.ctx(), &source);
+              }
+              ui.add_space(1.0);
+            }
+            _ => {}
           }
-          ui.add_space(1.0);
         }
-        _ => {}
       }
     }
-  }
-}
-
-struct TableOptions {
-  can_navigate: bool,
-  striped: bool,
-  resizable_columns: bool,
-}
-
-fn render_tree(ui: &mut Ui, node: &TreeNode<'_>, plugin: &mut DebugValsPlugin, opts: &TableOptions, compact: bool) {
-  // Nested keys first
-  for (name, child) in &node.branches {
-    let display_name = (*name).to_string();
-    let current = child;
-
-    CollapsingHeader::new(&display_name).id_salt(display_name).default_open(true).show(ui, |ui| {
-      render_tree(ui, current, plugin, opts, compact);
-    });
-  }
-
-  let all_leaves = node.leaves.iter().map(|(name, id)| (name.to_string(), *id));
-  let all_leaves: Vec<_> = all_leaves.collect();
-
-  if !all_leaves.is_empty() {
-    let interact_height = ui.spacing().interact_size.y;
-    let btn_col_width = interact_height + 2.0;
-    let available = ui.available_width();
-    let reserved = if opts.can_navigate { btn_col_width } else { 0.0 };
-    let name_col_width = (available * 0.35).clamp(60.0, 300.0);
-    let value_col_width = (available - name_col_width - reserved).max(60.0);
-
-    let mut columns = vec![
-      Column::new(name_col_width).resizable(opts.resizable_columns).range(Rangef::new(40.0, 400.0)),
-      Column::new(value_col_width).resizable(opts.resizable_columns).range(Rangef::new(40.0, f32::INFINITY)),
-    ];
-    if opts.can_navigate {
-      columns.push(Column::new(btn_col_width).resizable(false).range(Rangef::new(btn_col_width, btn_col_width)));
-    }
-
-    ui.scope(|ui| {
-      let row_height = interact_height + 1.0;
-      ui.set_max_height(row_height * all_leaves.len() as f32);
-      let mut delegate = ValsTableDelegate {
-        leaves: &all_leaves,
-        plugin,
-        interact_height,
-        can_navigate: opts.can_navigate,
-        striped: opts.striped,
-      };
-      let auto_size = if compact { AutoSizeMode::Never } else { AutoSizeMode::Always };
-      Table::new()
-        .id_salt("__vals_leaves")
-        .num_rows(all_leaves.len() as u64)
-        .columns(columns)
-        .headers(vec![])
-        .auto_size_mode(auto_size)
-        .show(ui, &mut delegate);
-    });
   }
 }
 
@@ -945,11 +1189,14 @@ macro_rules! show_vals {
 }
 
 macro_rules! impl_debug_val {
-  ($ty:ty, |$self:ident, $ui:ident, $meta:ident, $params:ident| $control:expr) => {
+  ($ty:ty, $display_fmt:literal, |$self:ident, $ui:ident, $meta:ident, $params:ident| $control:expr) => {
     impl DebugVal for $ty {
       #[allow(unused_variables)]
       fn render_value_ui(&mut $self, $ui: &mut Ui, $meta: &DebugValMetadata, $params: &ValParams) {
         $control
+      }
+      fn display_value(&self) -> String {
+        format!($display_fmt, self)
       }
       fn clone_boxed(&self) -> Box<dyn DebugVal> {
         Box::new(self.clone())
@@ -966,7 +1213,7 @@ macro_rules! impl_debug_val {
 
 macro_rules! impl_debug_val_numeric {
   ($ty:ty, $speed:expr, $format:literal) => {
-    impl_debug_val!($ty, |self, ui, metadata, params| {
+    impl_debug_val!($ty, $format, |self, ui, metadata, params| {
       if metadata.app_controlled {
         ui.add(Label::new(RichText::new(format!($format, self)).monospace()));
       } else {
@@ -997,7 +1244,7 @@ impl_debug_val_numeric!(u16, 1.0, "{}");
 impl_debug_val_numeric!(usize, 1.0, "{}");
 impl_debug_val_numeric!(isize, 1.0, "{}");
 
-impl_debug_val!(bool, |self, ui, metadata, _params| {
+impl_debug_val!(bool, "{}", |self, ui, metadata, _params| {
   if metadata.app_controlled {
     let text = if *self { "true" } else { "false" };
     ui.add(Label::new(RichText::new(text).monospace()));
@@ -1006,7 +1253,7 @@ impl_debug_val!(bool, |self, ui, metadata, _params| {
   }
 });
 
-impl_debug_val!(String, |self, ui, metadata, params| {
+impl_debug_val!(String, "{}", |self, ui, metadata, params| {
   if metadata.app_controlled {
     if self.is_empty() {
       ui.add(Label::new(RichText::new("(empty)").weak()).truncate());
@@ -1029,7 +1276,7 @@ impl_debug_val!(String, |self, ui, metadata, params| {
   }
 });
 
-impl_debug_val!(Color32, |self, ui, metadata, _params| {
+impl_debug_val!(Color32, "{:?}", |self, ui, metadata, _params| {
   if metadata.app_controlled {
     ui.add(Label::new(RichText::new(format!("{:?}", *self)).monospace()));
   } else {
@@ -1037,7 +1284,7 @@ impl_debug_val!(Color32, |self, ui, metadata, _params| {
   }
 });
 
-impl_debug_val!(Vec2, |self, ui, metadata, params| {
+impl_debug_val!(Vec2, "{:?}", |self, ui, metadata, params| {
   if metadata.app_controlled {
     ui.add(Label::new(RichText::new(format!("x: {:.3} y: {:.3}", self.x, self.y)).monospace()));
   } else {
@@ -1049,7 +1296,7 @@ impl_debug_val!(Vec2, |self, ui, metadata, params| {
   }
 });
 
-impl_debug_val!(Pos2, |self, ui, metadata, params| {
+impl_debug_val!(Pos2, "{:?}", |self, ui, metadata, params| {
   if metadata.app_controlled {
     ui.add(Label::new(RichText::new(format!("x: {:.3} y: {:.3}", self.x, self.y)).monospace()));
   } else {
@@ -1061,7 +1308,7 @@ impl_debug_val!(Pos2, |self, ui, metadata, params| {
   }
 });
 
-impl_debug_val!(TSTransform, |self, ui, metadata, _params| {
+impl_debug_val!(TSTransform, "{:?}", |self, ui, metadata, _params| {
   if metadata.app_controlled {
     ui.add(Label::new(
       RichText::new(format!("tx: {:.3} ty: {:.3} scale: {:.3}", self.translation.x, self.translation.y, self.scaling))
@@ -1077,7 +1324,7 @@ impl_debug_val!(TSTransform, |self, ui, metadata, _params| {
   }
 });
 
-impl_debug_val!(Rect, |self, ui, metadata, _params| {
+impl_debug_val!(Rect, "{:?}", |self, ui, metadata, _params| {
   if metadata.app_controlled {
     ui.add(Label::new(
       RichText::new(format!("min ({:.3}, {:.3}) max ({:.3}, {:.3})", self.min.x, self.min.y, self.max.x, self.max.y))
@@ -1097,7 +1344,35 @@ impl_debug_val!(Rect, |self, ui, metadata, _params| {
   }
 });
 
-impl_debug_val!(Range<i32>, |self, ui, metadata, _params| {
+impl<T: Clone + DebugVal + Send + Sync + 'static> DebugVal for Option<T> {
+  fn render_value_ui(&mut self, ui: &mut Ui, metadata: &DebugValMetadata, params: &ValParams) {
+    match self {
+      Some(inner) => inner.render_value_ui(ui, metadata, params),
+      None => {
+        ui.add(Label::new(RichText::new("None").weak()));
+      }
+    }
+  }
+
+  fn display_value(&self) -> String {
+    match self {
+      Some(inner) => inner.display_value(),
+      None => "None".into(),
+    }
+  }
+
+  fn clone_boxed(&self) -> Box<dyn DebugVal> {
+    Box::new(self.clone())
+  }
+
+  fn save_persisted(&self, _ctx: &Context, _id: Id) {}
+
+  fn load_persisted(_ctx: &Context, _id: Id) -> Option<Box<dyn DebugVal>> {
+    None
+  }
+}
+
+impl_debug_val!(Range<i32>, "{:?}", |self, ui, metadata, _params| {
   if metadata.app_controlled {
     ui.add(Label::new(RichText::new(format!("{}..{}", self.start, self.end)).monospace()));
   } else {
