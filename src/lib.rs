@@ -2,6 +2,9 @@ mod symbol_parser;
 pub mod vals;
 mod widget_inspect;
 
+#[cfg(feature = "logging")]
+pub mod logging;
+
 use std::sync::Arc;
 
 use egui::Id;
