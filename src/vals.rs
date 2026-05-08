@@ -9,9 +9,107 @@ use egui::{
 };
 use egui_table::{AutoSizeMode, CellInfo, Column, HeaderCellInfo, Table, TableDelegate};
 use regex::Regex;
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Mutex;
 use std::{any::Any, ops::Range};
+
+thread_local! {
+  static ACTIVE_VAL_PLACER: Cell<Option<Id>> = const { Cell::new(None) };
+  static ACTIVE_VAL_PREFIX: RefCell<String> = const { RefCell::new(String::new()) };
+}
+
+pub fn active_val_placer() -> Option<Id> {
+  ACTIVE_VAL_PLACER.with(|c| c.get())
+}
+
+pub fn active_val_prefix() -> String {
+  ACTIVE_VAL_PREFIX.with(|c| c.borrow().clone())
+}
+
+pub fn prefixed_key(key: &str) -> String {
+  ACTIVE_VAL_PREFIX.with(|c| {
+    let prefix = c.borrow();
+    if prefix.is_empty() { key.to_string() } else { format!("{}{KEY_DELIMITER}{key}", *prefix) }
+  })
+}
+
+fn auto_place(val_id: Id) {
+  if let Some(widget_id) = active_val_placer() {
+    with_plugin(|p| p.placed.push((val_id, widget_id)));
+  }
+}
+
+/// Guard that automatically places any `val!` / `val_handle!` created while it is alive,
+/// and optionally prefixes their keys.
+///
+/// Use at the top of a widget's render function:
+/// ```ignore
+/// fn render(&self, ui: &mut Ui) {
+///   let _group = ValGroup::new(ui, "my_widget");
+///   let speed = val!(f32, "speed", default = 1.0);
+///   // key becomes "my_widget/speed", automatically placed on this widget
+/// }
+/// ```
+pub struct ValGroup {
+  previous_placer: Option<Id>,
+  previous_prefix: String,
+}
+
+impl ValGroup {
+  pub fn new(ui: &Ui, name: &str) -> Self {
+    Self::with_id(ui.unique_id(), name)
+  }
+
+  pub fn with_id(widget_id: Id, name: &str) -> Self {
+    let previous_placer = ACTIVE_VAL_PLACER.with(|c| c.replace(Some(widget_id)));
+    let previous_prefix = ACTIVE_VAL_PREFIX.with(|c| {
+      let mut current = c.borrow_mut();
+      let prev = current.clone();
+      if current.is_empty() {
+        *current = name.to_string();
+      } else {
+        current.push_str(KEY_DELIMITER);
+        current.push_str(name);
+      }
+      prev
+    });
+    Self { previous_placer, previous_prefix }
+  }
+}
+
+impl Drop for ValGroup {
+  fn drop(&mut self) {
+    ACTIVE_VAL_PLACER.with(|c| c.set(self.previous_placer));
+    ACTIVE_VAL_PREFIX.with(|c| *c.borrow_mut() = std::mem::take(&mut self.previous_prefix));
+  }
+}
+
+/// Place and prefix all `val!` / `val_handle!` calls in the current scope.
+///
+/// ```ignore
+/// fn render(&self, ui: &mut Ui) {
+///   val_group!(ui, "my_widget");
+///   let speed = val!(f32, "speed", default = 1.0);
+///   // key becomes "my_widget/speed", automatically placed
+/// }
+///
+/// fn other(ui: &mut Ui) {
+///   val_group!(ui);
+///   // prefix defaults to enclosing function/module name
+/// }
+/// ```
+#[macro_export]
+macro_rules! val_group {
+  ($ui:expr, $name:expr) => {
+    let _val_group_guard = $crate::vals::ValGroup::new($ui, $name);
+  };
+  ($ui:expr) => {
+    let _module = module_path!();
+    let _val_group_name = _module.rsplit_once("::").map_or(_module, |(_, name)| name);
+    let _val_group_guard = $crate::vals::ValGroup::new($ui, _val_group_name);
+  };
+}
 
 use crate::{SourceLocation, open_file};
 
@@ -37,8 +135,7 @@ fn placed_dot_color(prefix: &str) -> Color32 {
 }
 
 const LABEL_BG: Color32 = Color32::from_black_alpha(200);
-const LABEL_PADDING: f32 = 2.0;
-const TRIANGLE_SIZE: f32 = 3.0;
+const INDICATOR_GAP: f32 = 2.0;
 const INDICATOR_RADIUS: f32 = 3.0;
 const INDICATOR_RADIUS_HOVER: f32 = 6.0;
 const INDICATOR_RADIUS_EXPANDED: f32 = 7.0;
@@ -52,48 +149,94 @@ impl LabelPlacer {
     Self { occupied: Vec::new() }
   }
 
-  /// Find a position for a label of `size` near `anchor_rect`, avoiding overlap with
-  /// previously placed labels. Returns `(label_min_pos, triangle_tip)` where `triangle_tip`
-  /// is the point on `anchor_rect` the triangle points towards.
-  pub fn place(&mut self, anchor_rect: Rect, hover_size: Vec2) -> (Pos2, Pos2) {
-    let padded = hover_size + vec2(LABEL_PADDING, LABEL_PADDING);
-    let gap = TRIANGLE_SIZE;
-    let cy = padded.y * 0.5;
+  /// Find a position for an indicator of `size` near `anchor_rect`, avoiding overlap
+  /// with previously placed indicators. Slides clockwise around the anchor rect
+  /// starting from the right-top corner, skipping past occupied regions.
+  /// Returns the top-left position of the indicator rect.
+  pub fn place(&mut self, anchor_rect: Rect, size: Vec2) -> Pos2 {
+    let gap = INDICATOR_GAP;
 
-    let candidates = [
-      // Right side of rect, label to the right
-      // Right side of rect, label to the right
-      (anchor_rect.right_center() + vec2(gap, -cy), anchor_rect.right_center()),
-      (anchor_rect.right_top() + vec2(gap, 0.0), anchor_rect.right_top()),
-      (anchor_rect.right_bottom() + vec2(gap, -padded.y), anchor_rect.right_bottom()),
-      // Left side of rect, label to the left
-      (anchor_rect.left_center() - vec2(padded.x + gap, cy), anchor_rect.left_center()),
-      (anchor_rect.left_top() - vec2(padded.x + gap, 0.0), anchor_rect.left_top()),
-      (anchor_rect.left_bottom() - vec2(padded.x + gap, padded.y), anchor_rect.left_bottom()),
-      // Center top (label above, points tip down)
-      (anchor_rect.center_top() - vec2(padded.x * 0.5, padded.y + gap), anchor_rect.center_top()),
-      // Center bottom (label below, points tip up)
-      (anchor_rect.center_bottom() + vec2(-padded.x * 0.5, gap), anchor_rect.center_bottom()),
-    ];
+    let pos = self
+      .try_slide(
+        size,
+        anchor_rect.top(),
+        anchor_rect.bottom(),
+        |t| Pos2::new(anchor_rect.right() + gap, t),
+        |occ| occ.max.y,
+      )
+      .or_else(|| {
+        self.try_slide(
+          size,
+          anchor_rect.right() - size.x,
+          anchor_rect.left(),
+          |t| Pos2::new(t, anchor_rect.bottom() + gap),
+          |occ| occ.min.x - size.x,
+        )
+      })
+      .or_else(|| {
+        self.try_slide(
+          size,
+          anchor_rect.bottom() - size.y,
+          anchor_rect.top(),
+          |t| Pos2::new(anchor_rect.left() - gap - size.x, t),
+          |occ| occ.min.y - size.y,
+        )
+      })
+      .or_else(|| {
+        self.try_slide(
+          size,
+          anchor_rect.left(),
+          anchor_rect.right() - size.x,
+          |t| Pos2::new(t, anchor_rect.top() - gap - size.y),
+          |occ| occ.max.x,
+        )
+      })
+      .unwrap_or_else(|| Pos2::new(anchor_rect.right() + gap, anchor_rect.top()));
 
-    let mut best = candidates[0];
-    let mut best_overlap = f32::MAX;
+    self.occupied.push(Rect::from_min_size(pos, size));
+    pos
+  }
 
-    for (pos, tip) in &candidates {
-      let candidate_rect = Rect::from_min_size(*pos, padded);
-      let overlap: f32 = self.occupied.iter().map(|r| overlap_area(*r, candidate_rect)).sum();
-      if overlap < best_overlap {
-        best_overlap = overlap;
-        best = (*pos, *tip);
-        if overlap == 0.0 {
-          break;
+  fn try_slide(
+    &self,
+    size: Vec2,
+    start: f32,
+    end: f32,
+    make_pos: impl Fn(f32) -> Pos2,
+    push_past: impl Fn(&Rect) -> f32,
+  ) -> Option<Pos2> {
+    let forward = end >= start;
+    let mut t = start;
+
+    for _ in 0..self.occupied.len() + 1 {
+      if (forward && t > end) || (!forward && t < end) {
+        return None;
+      }
+
+      let pos = make_pos(t);
+      let rect = Rect::from_min_size(pos, size);
+
+      let mut blocked = false;
+      let mut next_t = t;
+      for occ in &self.occupied {
+        if overlap_area(rect, *occ) > 0.0 {
+          blocked = true;
+          let push = push_past(occ);
+          if forward {
+            next_t = next_t.max(push);
+          } else {
+            next_t = next_t.min(push);
+          }
         }
       }
+
+      if !blocked {
+        return Some(pos);
+      }
+      t = next_t;
     }
 
-    let final_rect = Rect::from_min_size(best.0, padded);
-    self.occupied.push(final_rect);
-    best
+    None
   }
 }
 
@@ -115,19 +258,10 @@ fn overlap_area(a: Rect, b: Rect) -> f32 {
   x * y
 }
 
-fn paint_indicator(painter: &Painter, center: Pos2, radius: f32, tip: Pos2, color: Color32, expanded: bool) {
-  let along = (tip - center).normalized();
-  let base = center + along * (radius + 4.0);
-  let perp = vec2(-along.y, along.x);
-  let half = TRIANGLE_SIZE * 1.5;
-  let tri_verts = vec![tip, base + perp * half, base - perp * half];
+fn paint_indicator(painter: &Painter, center: Pos2, radius: f32, color: Color32, expanded: bool) {
   let stroke = Stroke::new(2.0, Color32::BLACK);
-
   painter.add(Shape::circle_stroke(center, radius, stroke));
-  painter.add(Shape::convex_polygon(tri_verts.clone(), Color32::TRANSPARENT, stroke));
-
   painter.add(Shape::circle_filled(center, radius, color));
-  painter.add(Shape::convex_polygon(tri_verts, color, Stroke::NONE));
 
   if expanded {
     let x_size = radius * 0.45;
@@ -516,15 +650,14 @@ impl DebugValsPlugin {
 
     let hover_size = vec2(INDICATOR_RADIUS_HOVER * 2.0, INDICATOR_RADIUS_HOVER * 2.0);
     let mut placer = LabelPlacer::new();
+    let screen_rect = ctx.screen_rect();
 
     for (widget_id, group) in &groups {
-      if group.rect == Rect::NOTHING {
+      if group.rect == Rect::NOTHING || !screen_rect.intersects(group.rect) {
         continue;
       }
-      let (indicator_pos, tip) = placer.place(group.rect, hover_size);
+      let indicator_pos = placer.place(group.rect, hover_size);
       let color = placed_dot_color(&group.prefix);
-      let dot_center =
-        indicator_pos + vec2(INDICATOR_RADIUS_HOVER + LABEL_PADDING + 10.0, INDICATOR_RADIUS_HOVER + LABEL_PADDING);
       let area_id = Id::new("placed-val-group").with(widget_id);
       let is_expanded = self.expanded_placed_groups.contains(widget_id);
 
@@ -540,10 +673,18 @@ impl DebugValsPlugin {
         } else {
           INDICATOR_RADIUS
         };
-        paint_indicator(&ctx.debug_painter(), dot_center, radius, tip, color, is_expanded);
+        let dot_center = indicator_pos + hover_size * 0.5;
+        paint_indicator(&ctx.debug_painter(), dot_center, radius, color, is_expanded);
 
         if hovered {
           paint_dashed_rect(&ctx.debug_painter(), group.rect, color);
+        } else if let Some(pointer_pos) = ctx.input(|i| i.pointer.hover_pos()) {
+          let dist = group.rect.distance_to_pos(pointer_pos);
+          if dist < 256.0 {
+            let alpha = ((1.0 - dist / 256.0) * 128.0) as u8;
+            let faded = Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), alpha);
+            paint_dashed_rect(&ctx.debug_painter(), group.rect, faded);
+          }
         }
 
         if response.clicked() {
@@ -586,7 +727,7 @@ impl DebugValsPlugin {
               ];
 
               let num_rows = rows.len() as u64;
-              ui.set_min_size(Vec2::new(500.0, num_rows as f32 * interact_height * 0.6));
+              ui.set_min_size(Vec2::new(500.0, (num_rows + 1) as f32 * interact_height * 1.0));
 
               let mut delegate = PlacedValsTableDelegate { rows: &rows, values: &mut self.values, interact_height };
               Table::new()
@@ -628,8 +769,10 @@ pub struct ValHandle<T: Clone + DebugVal> {
 
 impl<T: Clone + Default + DebugVal + 'static> ValHandle<T> {
   pub fn new(id: Id, metadata: DebugValMetadata, params: ValParams) -> Self {
+    let metadata = Self::apply_prefix(metadata);
     let id = Id::new(metadata.custom_key.as_deref().unwrap_or(metadata.file_line_col));
     let value = with_plugin(|p| p.get_or_insert::<T>(id, metadata.clone(), params.clone())).unwrap_or_default();
+    auto_place(id);
     Self { id, metadata, params, value }
   }
 }
@@ -643,11 +786,23 @@ impl<T: Clone + DebugVal + 'static> ValHandle<T> {
     self.value = val;
   }
 
+  fn apply_prefix(mut metadata: DebugValMetadata) -> DebugValMetadata {
+    if let Some(ref key) = metadata.custom_key {
+      let prefixed = prefixed_key(key);
+      if prefixed != *key {
+        metadata.custom_key = Some(prefixed);
+      }
+    }
+    metadata
+  }
+
   pub fn with_default(id: Id, metadata: DebugValMetadata, params: ValParams, default: impl Into<T>) -> Self {
+    let metadata = Self::apply_prefix(metadata);
     let id = Id::new(metadata.custom_key.as_deref().unwrap_or(metadata.file_line_col));
     let default = default.into();
     let value = with_plugin(|p| p.get_or_insert_with::<T>(id, metadata.clone(), params.clone(), default.clone()))
       .unwrap_or(default);
+    auto_place(id);
     Self { id, metadata, params, value }
   }
 

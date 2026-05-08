@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use egui::Id;
 #[cfg(feature = "vals")]
-pub use vals::{DebugValsPlugin, DebugValues, ValParams};
+pub use vals::{DebugValsPlugin, DebugValues, ValGroup, ValParams};
 pub type ValsEditor = DebugValues;
 
 /// Dummy macros for vals that returns a default value
