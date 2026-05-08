@@ -34,6 +34,25 @@ mod dummies {
     };
   }
 
+  #[macro_export]
+  macro_rules! val_handle {
+    ($ty:ty) => {
+      DummyValHandle::<$ty>::default()
+    };
+    ($ty:ty, $key:expr, default = $default:expr $(, $param:ident = $value:expr)* $(,)?) => {
+      DummyValHandle::<$ty>::new($default)
+    };
+    ($ty:ty, $key:expr, $($param:ident = $value:expr),+ $(,)?) => {
+      DummyValHandle::<$ty>::new($ty::default())
+    };
+    ($ty:ty, $key:expr) => {
+      DummyValHandle::<$ty>::new($ty::default())
+    };
+    ($ty:ty, $key1:expr, $($rest:expr),+ $(,)?) => {
+      $ty::default()
+    };
+  }
+
   pub struct DummyValHandle<T: Copy + Default>(T);
 
   impl Deref for DummyValHandle<T> {

@@ -1,6 +1,6 @@
 use egui::{
-  Button, Context, DragValue, FontId, Label, Painter, Rangef, Response, RichText, Sense, Stroke, TextEdit, TextStyle,
-  Ui, Widget,
+  Button, Context, DragValue, FontId, Label, Margin, Painter, Rangef, Response, RichText, Sense, Shadow, Stroke,
+  StrokeKind, TextEdit, TextStyle, Ui, Widget,
   collapsing_header::paint_default_icon,
   emath::{Pos2, Rect, TSTransform, Vec2},
   epaint::{Color32, Shape},
@@ -9,8 +9,8 @@ use egui::{
 };
 use egui_table::{AutoSizeMode, CellInfo, Column, HeaderCellInfo, Table, TableDelegate};
 use regex::Regex;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::sync::OnceLock;
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::sync::Mutex;
 use std::{any::Any, ops::Range};
 
 use crate::{SourceLocation, open_file};
@@ -21,14 +21,14 @@ pub const KEY_DELIMITER: &str = "/";
 const HIERARCHY_INDENT: f32 = 8.0;
 
 const PLACED_PALETTE: [Color32; 8] = [
-  Color32::from_rgb(255, 80, 80),
   Color32::from_rgb(80, 200, 255),
-  Color32::from_rgb(100, 255, 100),
   Color32::from_rgb(255, 200, 50),
-  Color32::from_rgb(220, 120, 255),
+  Color32::from_rgb(100, 255, 100),
   Color32::from_rgb(255, 150, 60),
+  Color32::from_rgb(220, 120, 255),
   Color32::from_rgb(80, 255, 220),
   Color32::from_rgb(255, 100, 180),
+  Color32::from_rgb(255, 80, 80),
 ];
 
 fn placed_dot_color(prefix: &str) -> Color32 {
@@ -36,10 +36,12 @@ fn placed_dot_color(prefix: &str) -> Color32 {
   PLACED_PALETTE[hash as usize % PLACED_PALETTE.len()]
 }
 
-const LABEL_FONT: FontId = FontId::monospace(9.0);
 const LABEL_BG: Color32 = Color32::from_black_alpha(200);
 const LABEL_PADDING: f32 = 2.0;
-const TRIANGLE_SIZE: f32 = 6.0;
+const TRIANGLE_SIZE: f32 = 3.0;
+const INDICATOR_RADIUS: f32 = 3.0;
+const INDICATOR_RADIUS_HOVER: f32 = 6.0;
+const INDICATOR_RADIUS_EXPANDED: f32 = 7.0;
 
 pub struct LabelPlacer {
   occupied: Vec<Rect>,
@@ -53,9 +55,9 @@ impl LabelPlacer {
   /// Find a position for a label of `size` near `anchor_rect`, avoiding overlap with
   /// previously placed labels. Returns `(label_min_pos, triangle_tip)` where `triangle_tip`
   /// is the point on `anchor_rect` the triangle points towards.
-  pub fn place(&mut self, anchor_rect: Rect, label_size: Vec2) -> (Pos2, Pos2) {
-    let padded = label_size + vec2(LABEL_PADDING * 2.0, LABEL_PADDING * 2.0);
-    let gap = TRIANGLE_SIZE + 2.0;
+  pub fn place(&mut self, anchor_rect: Rect, hover_size: Vec2) -> (Pos2, Pos2) {
+    let padded = hover_size + vec2(LABEL_PADDING, LABEL_PADDING);
+    let gap = TRIANGLE_SIZE;
     let cy = padded.y * 0.5;
 
     let candidates = [
@@ -113,38 +115,46 @@ fn overlap_area(a: Rect, b: Rect) -> f32 {
   x * y
 }
 
-fn paint_placed_label(painter: &Painter, label_pos: Pos2, tip: Pos2, key_segment: &str, value: &str, color: Color32) {
-  let dim = Color32::from_rgb(160, 160, 160);
-  let key_galley = painter.layout_no_wrap(format!("{key_segment} "), LABEL_FONT, dim);
-  let val_galley = painter.layout_no_wrap(value.to_string(), LABEL_FONT, Color32::WHITE);
-  let key_width = key_galley.size().x;
-  let total_size = vec2(key_width + val_galley.size().x, key_galley.size().y.max(val_galley.size().y));
-
-  let text_pos = label_pos + vec2(LABEL_PADDING, LABEL_PADDING);
-  let frame_rect = Rect::from_min_size(label_pos, total_size + vec2(LABEL_PADDING * 2.0, LABEL_PADDING * 2.0));
-
-  painter.add(Shape::rect_filled(frame_rect, 2.0, LABEL_BG));
-  painter.galley(text_pos, key_galley, dim);
-  painter.galley(text_pos + vec2(key_width, 0.0), val_galley, Color32::WHITE);
-
-  let edge_centers = [
-    frame_rect.left_center(),
-    frame_rect.right_center(),
-    frame_rect.center_top(),
-    frame_rect.center_bottom(),
-  ];
-  let base = *edge_centers.iter().min_by(|a, b| a.distance(tip).total_cmp(&b.distance(tip))).unwrap();
-  let along = (tip - base).normalized();
+fn paint_indicator(painter: &Painter, center: Pos2, radius: f32, tip: Pos2, color: Color32, expanded: bool) {
+  let along = (tip - center).normalized();
+  let base = center + along * (radius + 4.0);
   let perp = vec2(-along.y, along.x);
-  let half = TRIANGLE_SIZE * 0.5;
-  painter.add(Shape::convex_polygon(
-    vec![tip, base + perp * half, base - perp * half],
-    color,
-    Stroke::new(1.0, Color32::BLACK),
-  ));
+  let half = TRIANGLE_SIZE * 1.5;
+  let tri_verts = vec![tip, base + perp * half, base - perp * half];
+  let stroke = Stroke::new(2.0, Color32::BLACK);
+
+  painter.add(Shape::circle_stroke(center, radius, stroke));
+  painter.add(Shape::convex_polygon(tri_verts.clone(), Color32::TRANSPARENT, stroke));
+
+  painter.add(Shape::circle_filled(center, radius, color));
+  painter.add(Shape::convex_polygon(tri_verts, color, Stroke::NONE));
+
+  if expanded {
+    let x_size = radius * 0.45;
+    let x_stroke = Stroke::new(1.5, Color32::BLACK);
+    painter.line_segment([center - vec2(x_size, x_size), center + vec2(x_size, x_size)], x_stroke);
+    painter.line_segment([center - vec2(-x_size, x_size), center + vec2(-x_size, x_size)], x_stroke);
+  }
 }
 
-static PLUGIN_HANDLE: OnceLock<TypedPluginHandle<DebugValsPlugin>> = OnceLock::new();
+fn paint_dashed_rect(painter: &Painter, rect: Rect, color: Color32) {
+  let stroke = Stroke::new(1.0, color);
+  painter.add(Shape::dashed_line(&[rect.left_top(), rect.right_top()], stroke, 2.0, 4.0));
+  painter.add(Shape::dashed_line(&[rect.left_bottom(), rect.right_bottom()], stroke, 2.0, 4.0));
+  painter.add(Shape::dashed_line(&[rect.left_top(), rect.left_bottom()], stroke, 2.0, 4.0));
+  painter.add(Shape::dashed_line(&[rect.right_top(), rect.right_bottom()], stroke, 2.0, 4.0));
+}
+
+static PLUGIN_HANDLE: Mutex<Option<TypedPluginHandle<DebugValsPlugin>>> = Mutex::new(None);
+
+fn with_plugin<R>(f: impl FnOnce(&mut DebugValsPlugin) -> R) -> Option<R> {
+  let guard = PLUGIN_HANDLE.lock().unwrap();
+  guard.as_ref().map(|handle| f(&mut *handle.lock()))
+}
+
+pub fn refresh_plugin_handle(ctx: &Context) {
+  *PLUGIN_HANDLE.lock().unwrap() = Some(ctx.plugin::<DebugValsPlugin>());
+}
 
 /// Metadata about where a debug val was defined.
 #[derive(Clone)]
@@ -219,6 +229,9 @@ pub trait DebugVal: Any + Send + Sync {
   /// Return a short string representation of the current value.
   fn display_value(&self) -> String;
 
+  /// Return a Rust expression that reconstructs this value, for pasting into source code.
+  fn as_rust_literal(&self) -> String;
+
   /// Clone this value into a boxed trait object.
   fn clone_boxed(&self) -> Box<dyn DebugVal>;
 
@@ -233,8 +246,42 @@ pub trait DebugVal: Any + Send + Sync {
 
 struct DebugValEntry {
   value: Box<dyn DebugVal>,
+  default: Box<dyn DebugVal>,
   metadata: DebugValMetadata,
   params: ValParams,
+}
+
+impl DebugValEntry {
+  fn is_modified(&self) -> bool {
+    self.value.display_value() != self.default.display_value()
+  }
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub struct Options {
+  pub show_app_controlled: bool,
+  pub hidden_key_prefix_filter: String,
+  pub shown_placed_prefixes: BTreeSet<String>,
+}
+
+impl Default for Options {
+  fn default() -> Self {
+    Self { show_app_controlled: false, hidden_key_prefix_filter: String::new(), shown_placed_prefixes: BTreeSet::new() }
+  }
+}
+
+impl Options {
+  fn id() -> Id {
+    Id::new("gaze/debug_vals/options")
+  }
+
+  fn load(ctx: &Context) -> Self {
+    ctx.data_mut(|data| data.get_persisted::<Self>(Self::id())).unwrap_or_default()
+  }
+
+  fn save(&self, ctx: &Context) {
+    ctx.data_mut(|data| data.insert_persisted(Self::id(), self.clone()));
+  }
 }
 
 /// Plugin that stores all debug values.
@@ -242,41 +289,21 @@ pub struct DebugValsPlugin {
   values: HashMap<Id, DebugValEntry>,
   order: BTreeMap<String, Id>,
   ctx: Option<Context>,
-  show_app_controlled: bool,
-  hidden_key_prefix_filter: String,
   placed: Vec<(Id, Id)>,
-  shown_placed_prefixes: BTreeSet<String>,
+  expanded_placed_groups: HashSet<Id>,
+  options: Options,
 }
 
 impl DebugValsPlugin {
-  fn show_app_controlled_id() -> Id {
-    Id::new("gaze/debug_vals/show_app_controlled")
-  }
-
-  fn hidden_key_prefix_filter_id() -> Id {
-    Id::new("gaze/debug_vals/hidden_key_prefix_filter")
-  }
-
   pub fn new() -> Self {
     Self {
       values: HashMap::new(),
       order: BTreeMap::new(),
       ctx: None,
-      show_app_controlled: false,
-      hidden_key_prefix_filter: String::new(),
       placed: Vec::new(),
-      shown_placed_prefixes: BTreeSet::new(),
+      expanded_placed_groups: HashSet::new(),
+      options: Options::default(),
     }
-  }
-
-  fn persist_show_app_controlled(&self, ctx: &Context) {
-    ctx.data_mut(|data| data.insert_persisted(Self::show_app_controlled_id(), self.show_app_controlled));
-  }
-
-  fn persist_hidden_key_prefix_filter(&self, ctx: &Context) {
-    ctx.data_mut(|data| {
-      data.insert_persisted(Self::hidden_key_prefix_filter_id(), self.hidden_key_prefix_filter.clone());
-    });
   }
 
   /// Get a value from storage, or insert the default if it doesn't exist.
@@ -293,13 +320,15 @@ impl DebugValsPlugin {
       }
     }
 
+    let default_val = T::default();
+
     if !metadata.app_controlled {
       if let Some(ctx) = &self.ctx {
         if let Some(loaded) = T::load_persisted(ctx, id) {
           if let Some(typed) = (loaded.as_ref() as &dyn Any).downcast_ref::<T>() {
             let val = typed.clone();
             let label = metadata.display_label().to_string();
-            self.values.insert(id, DebugValEntry { value: loaded, metadata, params });
+            self.values.insert(id, DebugValEntry { value: loaded, default: Box::new(default_val), metadata, params });
             self.order.insert(label, id);
             return val;
           }
@@ -307,9 +336,11 @@ impl DebugValsPlugin {
       }
     }
 
-    let default_val = T::default();
     let label = metadata.display_label().to_string();
-    self.values.insert(id, DebugValEntry { value: Box::new(default_val.clone()), metadata, params });
+    self.values.insert(
+      id,
+      DebugValEntry { value: Box::new(default_val.clone()), default: Box::new(default_val.clone()), metadata, params },
+    );
     self.order.insert(label, id);
     default_val
   }
@@ -332,7 +363,7 @@ impl DebugValsPlugin {
           if let Some(typed) = (loaded.as_ref() as &dyn Any).downcast_ref::<T>() {
             let val = typed.clone();
             let label = metadata.display_label().to_string();
-            self.values.insert(id, DebugValEntry { value: loaded, metadata, params });
+            self.values.insert(id, DebugValEntry { value: loaded, default: Box::new(default), metadata, params });
             self.order.insert(label, id);
             return val;
           }
@@ -341,7 +372,10 @@ impl DebugValsPlugin {
     }
 
     let label = metadata.display_label().to_string();
-    self.values.insert(id, DebugValEntry { value: Box::new(default.clone()), metadata, params });
+    self.values.insert(
+      id,
+      DebugValEntry { value: Box::new(default.clone()), default: Box::new(default.clone()), metadata, params },
+    );
     self.order.insert(label, id);
     default
   }
@@ -352,7 +386,15 @@ impl DebugValsPlugin {
     T: Clone + DebugVal + 'static,
   {
     let label = metadata.display_label().to_string();
-    self.values.insert(id, DebugValEntry { value: Box::new(value), metadata, params });
+    if let Some(entry) = self.values.get_mut(&id) {
+      entry.value = Box::new(value);
+      entry.metadata = metadata;
+      entry.params = params;
+    } else {
+      self
+        .values
+        .insert(id, DebugValEntry { value: Box::new(value.clone()), default: Box::new(value), metadata, params });
+    }
     self.order.insert(label, id);
   }
 
@@ -406,25 +448,40 @@ impl Plugin for DebugValsPlugin {
   }
 
   fn setup(&mut self, ctx: &Context) {
-    self.show_app_controlled =
-      ctx.data_mut(|data| data.get_persisted::<bool>(Self::show_app_controlled_id())).unwrap_or(false);
-    self.hidden_key_prefix_filter =
-      ctx.data_mut(|data| data.get_persisted::<String>(Self::hidden_key_prefix_filter_id())).unwrap_or_default();
-    let handle = ctx.plugin::<DebugValsPlugin>();
-    if PLUGIN_HANDLE.set(handle).is_err() {
-      panic!("DebugValsPlugin initialized twice");
-    }
+    self.options = Options::load(ctx);
+    *PLUGIN_HANDLE.lock().unwrap() = Some(ctx.plugin::<DebugValsPlugin>());
     self.ctx = Some(ctx.clone());
   }
 
+  fn on_begin_pass(&mut self, ui: &mut Ui) {
+    *PLUGIN_HANDLE.lock().unwrap() = Some(ui.ctx().plugin::<DebugValsPlugin>());
+  }
+
   fn on_end_pass(&mut self, ui: &mut Ui) {
+    self.render_placed_vals(ui.ctx());
+  }
+}
+
+impl DebugValsPlugin {
+  /// Render placed val overlays. Can be called explicitly by the app at the end of its
+  /// render loop for hot-reload support: since hot-reloaded code replaces the app's
+  /// update fn but not the plugin's on_end_pass, calling this directly ensures the
+  /// overlays use the latest reloaded code path.
+  ///
+  /// Uses `take` on `self.placed`, so calling from both the app and on_end_pass is safe —
+  /// whichever runs first gets the data, the second call is a no-op.
+  pub fn show_placed_vals(ctx: &Context) {
+    with_plugin(|plugin| plugin.render_placed_vals(ctx));
+  }
+
+  fn render_placed_vals(&mut self, ctx: &Context) {
     let placed = std::mem::take(&mut self.placed);
-    if self.shown_placed_prefixes.is_empty() {
+    if self.options.shown_placed_prefixes.is_empty() {
       return;
     }
-    let ctx = ui.ctx();
-    let painter = ctx.debug_painter();
-    let mut placer = LabelPlacer::new();
+
+    let mut group_index: HashMap<Id, usize> = HashMap::new();
+    let mut groups: Vec<(Id, WidgetGroup)> = Vec::new();
 
     for (val_id, widget_id) in &placed {
       let prefix = self
@@ -436,31 +493,129 @@ impl Plugin for DebugValsPlugin {
         })
         .unwrap_or_default();
 
-      if !self.shown_placed_prefixes.contains(&prefix) {
+      if !self.options.shown_placed_prefixes.contains(&prefix) {
         continue;
       }
 
-      if let Some(response) = ctx.read_response(*widget_id) {
-        let mut rect = response.rect;
-        if let Some(transform) = ctx.layer_transform_to_global(response.layer_id) {
-          rect = transform * rect;
+      let idx = *group_index.entry(*widget_id).or_insert_with(|| {
+        let rect = ctx
+          .read_response(*widget_id)
+          .map(|response| {
+            let mut rect = response.rect;
+            if let Some(transform) = ctx.layer_transform_to_global(response.layer_id) {
+              rect = transform * rect;
+            }
+            rect
+          })
+          .unwrap_or(Rect::NOTHING);
+        groups.push((*widget_id, WidgetGroup { rect, val_ids: Vec::new(), prefix }));
+        groups.len() - 1
+      });
+      groups[idx].1.val_ids.push(*val_id);
+    }
+
+    let hover_size = vec2(INDICATOR_RADIUS_HOVER * 2.0, INDICATOR_RADIUS_HOVER * 2.0);
+    let mut placer = LabelPlacer::new();
+
+    for (widget_id, group) in &groups {
+      if group.rect == Rect::NOTHING {
+        continue;
+      }
+      let (indicator_pos, tip) = placer.place(group.rect, hover_size);
+      let color = placed_dot_color(&group.prefix);
+      let dot_center =
+        indicator_pos + vec2(INDICATOR_RADIUS_HOVER + LABEL_PADDING + 10.0, INDICATOR_RADIUS_HOVER + LABEL_PADDING);
+      let area_id = Id::new("placed-val-group").with(widget_id);
+      let is_expanded = self.expanded_placed_groups.contains(widget_id);
+
+      egui::Area::new(area_id).order(egui::Order::Debug).fixed_pos(indicator_pos).interactable(true).show(ctx, |ui| {
+        let (_allocated_rect, response) = ui.allocate_exact_size(hover_size, Sense::click_and_drag());
+        let hovered = response.hovered();
+        // let active = hovered || is_expanded;
+
+        let radius = if is_expanded {
+          INDICATOR_RADIUS_EXPANDED + 1.0
+        } else if hovered {
+          INDICATOR_RADIUS_HOVER
+        } else {
+          INDICATOR_RADIUS
+        };
+        paint_indicator(&ctx.debug_painter(), dot_center, radius, tip, color, is_expanded);
+
+        if hovered {
+          paint_dashed_rect(&ctx.debug_painter(), group.rect, color);
         }
 
-        let (key_segment, value_str, color) = if let Some(entry) = self.values.get(val_id) {
-          let key = entry.metadata.display_label();
-          let last = key.rsplit_once(KEY_DELIMITER).map_or(key, |(_, last)| last);
-          (last.to_string(), entry.value.display_value(), placed_dot_color(&prefix))
-        } else {
-          (format!("{val_id:?}"), String::new(), PLACED_PALETTE[0])
-        };
+        if response.clicked() {
+          if is_expanded {
+            self.expanded_placed_groups.remove(widget_id);
+          } else {
+            self.expanded_placed_groups.insert(*widget_id);
+          }
+        }
 
-        let combined = format!("{key_segment} {value_str}");
-        let galley_size = painter.layout_no_wrap(combined, LABEL_FONT, Color32::WHITE).size();
-        let (label_pos, tip) = placer.place(rect, galley_size);
-        paint_placed_label(&painter, label_pos, tip, &key_segment, &value_str, color);
-      }
+        if is_expanded {
+          egui::Frame::new()
+            .fill(LABEL_BG)
+            .stroke(Stroke::new(1.0, Color32::from_gray(28)))
+            .corner_radius(3.0)
+            .inner_margin(Margin { left: 6, right: 2, top: 2, bottom: 2 })
+            .show(ui, |ui| {
+              let style = ui.style_mut();
+              style.spacing.interact_size = vec2(15.0, 15.0);
+              style.spacing.item_spacing = vec2(0.0, 0.0);
+              style.override_text_style = Some(TextStyle::Small);
+
+              let rows: Vec<PlacedValRow> = group
+                .val_ids
+                .iter()
+                .filter_map(|val_id| {
+                  let entry = self.values.get(val_id)?;
+                  let key = entry.metadata.display_label();
+                  let last = key.rsplit_once(KEY_DELIMITER).map_or(key, |(_, last)| last);
+                  Some(PlacedValRow { name: last.to_string(), val_id: *val_id })
+                })
+                .collect();
+
+              let interact_height = ui.spacing().interact_size.y;
+              let btn_col_width = interact_height * 3.0 + 6.0;
+              let columns = vec![
+                Column::new(60.0).resizable(true).range(Rangef::new(40.0, 200.0)),
+                Column::new(100.0).resizable(true).range(Rangef::new(40.0, f32::INFINITY)),
+                Column::new(btn_col_width).resizable(false).range(Rangef::new(btn_col_width, btn_col_width)),
+              ];
+
+              let num_rows = rows.len() as u64;
+              ui.set_min_size(Vec2::new(500.0, num_rows as f32 * interact_height * 0.6));
+
+              let mut delegate = PlacedValsTableDelegate { rows: &rows, values: &mut self.values, interact_height };
+              Table::new()
+                .id_salt(("__placed_vals_table", widget_id))
+                .num_rows(num_rows)
+                .columns(columns)
+                .headers(vec![])
+                .auto_size_mode(AutoSizeMode::Always)
+                .show(ui, &mut delegate);
+            });
+        } else {
+          response.on_hover_ui_at_pointer(|ui| {
+            for val_id in &group.val_ids {
+              if let Some(entry) = self.values.get(val_id) {
+                let key = entry.metadata.display_label();
+                let last = key.rsplit_once(KEY_DELIMITER).map_or(key, |(_, last)| last);
+                ui.label(RichText::new(format!("{last}: {}", entry.value.display_value())).monospace().size(9.0));
+              }
+            }
+          });
+        }
+      });
     }
   }
+}
+struct WidgetGroup {
+  rect: Rect,
+  val_ids: Vec<Id>,
+  prefix: String,
 }
 
 /// A handle to a debug value that writes back on drop.
@@ -474,18 +629,16 @@ pub struct ValHandle<T: Clone + DebugVal> {
 impl<T: Clone + Default + DebugVal + 'static> ValHandle<T> {
   pub fn new(id: Id, metadata: DebugValMetadata, params: ValParams) -> Self {
     let id = Id::new(metadata.custom_key.as_deref().unwrap_or(metadata.file_line_col));
-    let value = if let Some(handle) = PLUGIN_HANDLE.get() {
-      let mut guard = handle.lock();
-      guard.get_or_insert::<T>(id, metadata.clone(), params.clone())
-    } else {
-      T::default()
-    };
-
+    let value = with_plugin(|p| p.get_or_insert::<T>(id, metadata.clone(), params.clone())).unwrap_or_default();
     Self { id, metadata, params, value }
   }
 }
 
 impl<T: Clone + DebugVal + 'static> ValHandle<T> {
+  pub fn get(&self) -> T {
+    self.value.clone()
+  }
+
   pub fn set(&mut self, val: T) {
     self.value = val;
   }
@@ -493,20 +646,15 @@ impl<T: Clone + DebugVal + 'static> ValHandle<T> {
   pub fn with_default(id: Id, metadata: DebugValMetadata, params: ValParams, default: impl Into<T>) -> Self {
     let id = Id::new(metadata.custom_key.as_deref().unwrap_or(metadata.file_line_col));
     let default = default.into();
-    let value = if let Some(handle) = PLUGIN_HANDLE.get() {
-      let mut guard = handle.lock();
-      guard.get_or_insert_with::<T>(id, metadata.clone(), params.clone(), default)
-    } else {
-      default
-    };
-
+    let value = with_plugin(|p| p.get_or_insert_with::<T>(id, metadata.clone(), params.clone(), default.clone()))
+      .unwrap_or(default);
     Self { id, metadata, params, value }
   }
 
   pub fn place(self, ui: &Ui) -> Self {
-    if let Some(handle) = PLUGIN_HANDLE.get() {
-      handle.lock().placed.push((self.id, ui.unique_id()));
-    }
+    let id = self.id;
+    let widget_id = ui.unique_id();
+    with_plugin(|p| p.placed.push((id, widget_id)));
     self
   }
 }
@@ -527,10 +675,7 @@ impl<T: Clone + DebugVal> std::ops::DerefMut for ValHandle<T> {
 
 impl<T: Clone + DebugVal + 'static> Drop for ValHandle<T> {
   fn drop(&mut self) {
-    if let Some(handle) = PLUGIN_HANDLE.get() {
-      let mut guard = handle.lock();
-      guard.set(self.id, self.metadata.clone(), self.params.clone(), self.value.clone());
-    }
+    with_plugin(|p| p.set(self.id, self.metadata.clone(), self.params.clone(), self.value.clone()));
   }
 }
 
@@ -623,6 +768,89 @@ macro_rules! val {
       app_controlled: false,
     };
     *$crate::vals::ValHandle::<$ty>::new(id, metadata, $crate::vals::ValParams::default())
+  }};
+}
+
+/// Get a debug value (read-only). Uses file/line/column as key if no custom key provided.
+/// Returns the value directly, not a handle.
+///
+/// ```ignore
+/// val!(f32)                                                    // anonymous, no params
+/// val!(f32, "speed")                                           // named, no params
+/// val!(f32, "speed", min = 0.0, max = 10.0)                    // named, with params
+/// val!(u32, "age", default = 25, min = 18, max = 100)          // with default
+/// val!(String, "title", default = "mr", options = ["mr", "ms"]) // string with default + dropdown
+/// val!(f32, "physics", "gravity")                              // hierarchical key
+/// ```
+#[macro_export]
+macro_rules! val_handle {
+  ($ty:ty) => {{
+    let file_line_col = concat!(file!(), ":", line!(), ":", column!());
+    let key = $crate::vals::Id::new(file_line_col);
+    let metadata = $crate::vals::DebugValMetadata {
+      file_line_col,
+      module_path: module_path!(),
+      custom_key: None,
+      app_controlled: false,
+    };
+    $crate::vals::ValHandle::<$ty>::new(key, metadata, $crate::vals::ValParams::default())
+  }};
+  ($ty:ty, $key:expr, default = $default:expr $(, $param:ident = $value:expr)* $(,)?) => {{
+    let file_line_col = concat!(file!(), ":", line!(), ":", column!());
+    let custom_key = format!("{:?}", $key);
+    let id = $crate::vals::Id::new(custom_key.as_str());
+    let metadata = $crate::vals::DebugValMetadata {
+      file_line_col,
+      module_path: module_path!(),
+      custom_key: Some(custom_key),
+      app_controlled: false,
+    };
+    let params = $crate::vals::ValParams::default()$(.$param($value))*;
+    $crate::vals::ValHandle::<$ty>::with_default(id, metadata, params, $default)
+  }};
+  ($ty:ty, $key:expr, $($param:ident = $value:expr),+ $(,)?) => {{
+    let file_line_col = concat!(file!(), ":", line!(), ":", column!());
+    let custom_key = format!("{:?}", $key);
+    let id = $crate::vals::Id::new(custom_key.as_str());
+    let metadata = $crate::vals::DebugValMetadata {
+      file_line_col,
+      module_path: module_path!(),
+      custom_key: Some(custom_key),
+      app_controlled: false,
+    };
+    let params = $crate::vals::ValParams::default()$(.$param($value))+;
+    $crate::vals::ValHandle::<$ty>::new(id, metadata, params)
+  }};
+  ($ty:ty, $key:expr) => {{
+    let file_line_col = concat!(file!(), ":", line!(), ":", column!());
+    let custom_key = format!("{:?}", $key);
+    let id = $crate::vals::Id::new(custom_key.as_str());
+    let metadata = $crate::vals::DebugValMetadata {
+      file_line_col,
+      module_path: module_path!(),
+      custom_key: Some(custom_key),
+      app_controlled: false,
+    };
+    $crate::vals::ValHandle::<$ty>::new(id, metadata, $crate::vals::ValParams::default())
+  }};
+  ($ty:ty, $key1:expr, $($rest:expr),+ $(,)?) => {{
+    let file_line_col = concat!(file!(), ":", line!(), ":", column!());
+    let custom_key = {
+      let mut key = format!("{:?}", $key1);
+      $(
+        key.push_str($crate::vals::KEY_DELIMITER);
+        key.push_str(&format!("{:?}", $rest));
+      )+
+      key
+    };
+    let id = $crate::vals::Id::new(custom_key.as_str());
+    let metadata = $crate::vals::DebugValMetadata {
+      file_line_col,
+      module_path: module_path!(),
+      custom_key: Some(custom_key),
+      app_controlled: false,
+    };
+    $crate::vals::ValHandle::<$ty>::new(id, metadata, $crate::vals::ValParams::default())
   }};
 }
 
@@ -728,9 +956,7 @@ macro_rules! set_val {
 
 /// Remove a val and all children vals whose key starts with the given prefix.
 pub fn clear_val_by_key(prefix: &str) {
-  if let Some(handle) = PLUGIN_HANDLE.get() {
-    handle.lock().clear(prefix);
-  }
+  with_plugin(|p| p.clear(prefix));
 }
 
 /// Remove a val and all children vals whose key starts with the given prefix.
@@ -856,7 +1082,8 @@ impl Widget for DebugValues {
         .collect::<Vec<String>>()
     });
     let response = ui.vertical(|ui| {
-      if let Some(handle) = PLUGIN_HANDLE.get() {
+      let guard = PLUGIN_HANDLE.lock().unwrap();
+      if let Some(handle) = guard.as_ref() {
         let mut plugin = handle.lock();
         let style = ui.style_mut();
         style.spacing.interact_size.y = if self.compact { 15.0 } else { 19.0 };
@@ -874,32 +1101,31 @@ impl Widget for DebugValues {
               let placed_prefixes = placed_prefixes_from(&plugin);
               let placed_count = plugin.placed.len();
               let caption = format!("Placed {placed_count}");
-              egui::ComboBox::from_id_salt("placed_prefixes_dropdown")
-                .selected_text(caption)
-                .show_ui(ui, |ui| {
-                  for prefix in &placed_prefixes {
-                    let color = placed_dot_color(prefix);
-                    let mut enabled = plugin.shown_placed_prefixes.contains(prefix);
-                    ui.horizontal(|ui| {
-                      let (dot_rect, _) = ui.allocate_exact_size(vec2(8.0, 8.0), egui::Sense::empty());
-                      ui.painter().circle_filled(dot_rect.center(), 3.0, color);
-                      if ui.toggle_value(&mut enabled, prefix.as_str()).changed() {
-                        if enabled {
-                          plugin.shown_placed_prefixes.insert(prefix.clone());
-                        } else {
-                          plugin.shown_placed_prefixes.remove(prefix);
-                        }
+              egui::ComboBox::from_id_salt("placed_prefixes_dropdown").selected_text(caption).show_ui(ui, |ui| {
+                for prefix in &placed_prefixes {
+                  let color = placed_dot_color(prefix);
+                  let mut enabled = plugin.options.shown_placed_prefixes.contains(prefix);
+                  ui.horizontal(|ui| {
+                    let (dot_rect, _) = ui.allocate_exact_size(vec2(8.0, 8.0), egui::Sense::empty());
+                    ui.painter().circle_filled(dot_rect.center(), 3.0, color);
+                    if ui.toggle_value(&mut enabled, prefix.as_str()).changed() {
+                      if enabled {
+                        plugin.options.shown_placed_prefixes.insert(prefix.clone());
+                      } else {
+                        plugin.options.shown_placed_prefixes.remove(prefix);
                       }
-                    });
-                  }
-                });
+                      plugin.options.save(ui.ctx());
+                    }
+                  });
+                }
+              });
 
-              if ui.toggle_value(&mut plugin.show_app_controlled, "Muts").changed() {
-                plugin.persist_show_app_controlled(ui.ctx());
+              if ui.toggle_value(&mut plugin.options.show_app_controlled, "Muts").changed() {
+                plugin.options.save(ui.ctx());
               }
 
-              let is_filter_active = !plugin.hidden_key_prefix_filter.trim().is_empty();
-              let filter_compile = compile_hidden_prefix_filter_regex(&plugin.hidden_key_prefix_filter);
+              let is_filter_active = !plugin.options.hidden_key_prefix_filter.trim().is_empty();
+              let filter_compile = compile_hidden_prefix_filter_regex(&plugin.options.hidden_key_prefix_filter);
               if is_filter_active {
                 match filter_compile {
                   Ok(Some(_)) => {
@@ -916,25 +1142,26 @@ impl Widget for DebugValues {
 
               let filter_response = ui
                 .add(
-                  TextEdit::singleline(&mut plugin.hidden_key_prefix_filter)
+                  TextEdit::singleline(&mut plugin.options.hidden_key_prefix_filter)
                     .desired_width(180.0)
                     .hint_text("Hide key prefixes: foo|bar"),
                 )
                 .on_hover_text("Regex key prefixes to hide (use | to separate multiple prefixes)");
               if filter_response.changed() {
-                plugin.persist_hidden_key_prefix_filter(ui.ctx());
+                plugin.options.save(ui.ctx());
               }
             });
           });
         }
 
-        let hidden_prefix_filter = compile_hidden_prefix_filter_regex(&plugin.hidden_key_prefix_filter).ok().flatten();
+        let hidden_prefix_filter =
+          compile_hidden_prefix_filter_regex(&plugin.options.hidden_key_prefix_filter).ok().flatten();
 
-        let DebugValsPlugin { values, order, show_app_controlled, .. } = &*plugin;
+        let DebugValsPlugin { values, order, options, .. } = &*plugin;
 
         let entries: Vec<(Vec<String>, Id)> = order
           .iter()
-          .filter(|(_, id)| *show_app_controlled || values.get(id).map_or(true, |e| !e.metadata.app_controlled))
+          .filter(|(_, id)| options.show_app_controlled || values.get(id).map_or(true, |e| !e.metadata.app_controlled))
           .filter_map(|(label, &id)| {
             let segments: Vec<String> = label.split(KEY_DELIMITER).map(|s| s.trim_matches('"').to_string()).collect();
             if let Some(prefix_filter) = hidden_prefix_filter.as_ref() {
@@ -971,7 +1198,7 @@ impl Widget for DebugValues {
 
         if !flat_rows.is_empty() {
           let interact_height = ui.spacing().interact_size.y;
-          let btn_col_width = interact_height + 2.0;
+          let btn_col_width = interact_height * 3.0 + 6.0;
           let available = ui.available_width();
           let reserved = if self.can_navigate { btn_col_width } else { 0.0 };
           let name_col_width = (available * 0.35).clamp(60.0, 300.0);
@@ -982,18 +1209,13 @@ impl Widget for DebugValues {
             Column::new(value_col_width).resizable(self.resizable_columns).range(Rangef::new(40.0, f32::INFINITY)),
           ];
           if self.can_navigate {
-            columns
-              .push(Column::new(btn_col_width).resizable(false).range(Rangef::new(btn_col_width, btn_col_width)));
+            columns.push(Column::new(btn_col_width).resizable(false).range(Rangef::new(btn_col_width, btn_col_width)));
           }
 
           let auto_size = if self.compact { AutoSizeMode::Never } else { AutoSizeMode::Always };
           let num_rows = flat_rows.len() as u64;
-          let mut delegate = ValsTableDelegate {
-            rows: &flat_rows,
-            plugin: &mut plugin,
-            interact_height,
-            striped: self.striped,
-          };
+          let mut delegate =
+            ValsTableDelegate { rows: &flat_rows, plugin: &mut plugin, interact_height, striped: self.striped };
           Table::new()
             .id_salt("__vals_table")
             .num_rows(num_rows)
@@ -1060,6 +1282,95 @@ fn flatten_tree(node: &TreeNode<'_>, depth: usize, path: &str, ctx: &Context, ou
   }
 }
 
+struct PlacedValRow {
+  name: String,
+  val_id: Id,
+}
+
+struct PlacedValsTableDelegate<'a> {
+  rows: &'a [PlacedValRow],
+  values: &'a mut HashMap<Id, DebugValEntry>,
+  interact_height: f32,
+}
+
+impl TableDelegate for PlacedValsTableDelegate<'_> {
+  fn default_row_height(&self) -> f32 {
+    self.interact_height + 1.0
+  }
+
+  fn header_cell_ui(&mut self, _ui: &mut Ui, _cell: &HeaderCellInfo) {}
+
+  fn cell_ui(&mut self, ui: &mut Ui, cell: &CellInfo) {
+    let row = &self.rows[cell.row_nr as usize];
+    if let Some(entry) = self.values.get_mut(&row.val_id) {
+      let modified = entry.is_modified();
+      let metadata = entry.metadata.clone();
+      match cell.col_nr {
+        0 => {
+          let dim = Color32::from_rgb(160, 160, 160);
+          let bright = Color32::from_rgb(220, 220, 220);
+          let color = if modified { bright } else { dim };
+          ui.add(Label::new(RichText::new(&row.name).monospace().size(9.0).color(color)).truncate());
+        }
+        1 => {
+          ui.add_space(2.0);
+          ui.spacing_mut().item_spacing = vec2(4.0, 0.0);
+          ui.horizontal_wrapped(|ui| {
+            entry.value.render_value_ui(ui, &metadata, &entry.params);
+          });
+          if !entry.metadata.app_controlled {
+            entry.value.save_persisted(ui.ctx(), row.val_id);
+          }
+        }
+        2 => {
+          ui.add_space(1.0);
+          if ui
+            .add(
+              Button::new(RichText::new("{}").monospace().size(10.0))
+                .min_size(Vec2::splat(self.interact_height))
+                .frame(false)
+                .frame_when_inactive(false),
+            )
+            .on_hover_text(metadata.file_line_col)
+            .clicked()
+          {
+            let source = SourceLocation { path: metadata.file_line_col.to_string(), line: 0, column: 0 };
+            open_file(ui.ctx(), &source);
+          }
+          let literal = entry.value.as_rust_literal();
+          if ui
+            .add(
+              Button::new(RichText::new("=").monospace().size(10.0))
+                .min_size(Vec2::splat(self.interact_height))
+                .frame(false)
+                .frame_when_inactive(false),
+            )
+            .on_hover_text(format!("Copy: {literal}"))
+            .clicked()
+          {
+            ui.ctx().copy_text(literal);
+          }
+          let reset_response = ui.add_enabled(
+            modified,
+            Button::new(RichText::new("↺").size(10.0))
+              .min_size(Vec2::splat(self.interact_height))
+              .frame(false)
+              .frame_when_inactive(false),
+          );
+          if modified {
+            reset_response.on_hover_text("Reset to default").clicked().then(|| {
+              entry.value = entry.default.clone_boxed();
+              entry.value.save_persisted(ui.ctx(), row.val_id);
+            });
+          }
+          ui.add_space(1.0);
+        }
+        _ => {}
+      }
+    }
+  }
+}
+
 struct ValsTableDelegate<'a> {
   rows: &'a [FlatRow],
   plugin: &'a mut DebugValsPlugin,
@@ -1120,6 +1431,7 @@ impl TableDelegate for ValsTableDelegate<'_> {
       }
       FlatRow::Leaf { name, val_id, depth } => {
         if let Some(entry) = self.plugin.values.get_mut(val_id) {
+          let modified = entry.is_modified();
           let metadata = DebugValMetadata {
             file_line_col: entry.metadata.file_line_col,
             module_path: entry.metadata.module_path,
@@ -1130,8 +1442,11 @@ impl TableDelegate for ValsTableDelegate<'_> {
             0 => {
               let indent = *depth as f32 * HIERARCHY_INDENT;
               ui.add_space(indent);
-              let label = Label::new(metadata.display_label()).truncate();
-              ui.add(label).on_hover_text(metadata.file_line_col);
+              let mut text = RichText::new(metadata.display_label());
+              if modified {
+                text = text.strong();
+              }
+              ui.add(Label::new(text).truncate()).on_hover_text(metadata.file_line_col);
             }
             1 => {
               ui.add_space(2.0);
@@ -1155,6 +1470,32 @@ impl TableDelegate for ValsTableDelegate<'_> {
               {
                 let source = SourceLocation { path: metadata.file_line_col.to_string(), line: 0, column: 0 };
                 open_file(ui.ctx(), &source);
+              }
+              let literal = entry.value.as_rust_literal();
+              if ui
+                .add(
+                  Button::new(RichText::new("=").monospace().size(10.0))
+                    .min_size(Vec2::splat(self.interact_height))
+                    .frame(false)
+                    .frame_when_inactive(false),
+                )
+                .on_hover_text(format!("Copy: {literal}"))
+                .clicked()
+              {
+                ui.ctx().copy_text(literal);
+              }
+              let reset_response = ui.add_enabled(
+                modified,
+                Button::new(RichText::new("↺").size(10.0))
+                  .min_size(Vec2::splat(self.interact_height))
+                  .frame(false)
+                  .frame_when_inactive(false),
+              );
+              if modified {
+                reset_response.on_hover_text("Reset to default").clicked().then(|| {
+                  entry.value = entry.default.clone_boxed();
+                  entry.value.save_persisted(ui.ctx(), *val_id);
+                });
               }
               ui.add_space(1.0);
             }
@@ -1189,7 +1530,7 @@ macro_rules! show_vals {
 }
 
 macro_rules! impl_debug_val {
-  ($ty:ty, $display_fmt:literal, |$self:ident, $ui:ident, $meta:ident, $params:ident| $control:expr) => {
+  ($ty:ty, $display_fmt:literal, |$lit_self:ident| $literal:expr, |$self:ident, $ui:ident, $meta:ident, $params:ident| $control:expr) => {
     impl DebugVal for $ty {
       #[allow(unused_variables)]
       fn render_value_ui(&mut $self, $ui: &mut Ui, $meta: &DebugValMetadata, $params: &ValParams) {
@@ -1197,6 +1538,9 @@ macro_rules! impl_debug_val {
       }
       fn display_value(&self) -> String {
         format!($display_fmt, self)
+      }
+      fn as_rust_literal(&$lit_self) -> String {
+        $literal
       }
       fn clone_boxed(&self) -> Box<dyn DebugVal> {
         Box::new(self.clone())
@@ -1213,7 +1557,7 @@ macro_rules! impl_debug_val {
 
 macro_rules! impl_debug_val_numeric {
   ($ty:ty, $speed:expr, $format:literal) => {
-    impl_debug_val!($ty, $format, |self, ui, metadata, params| {
+    impl_debug_val!($ty, $format, |self| format!($format, self), |self, ui, metadata, params| {
       if metadata.app_controlled {
         ui.add(Label::new(RichText::new(format!($format, self)).monospace()));
       } else {
@@ -1235,16 +1579,16 @@ macro_rules! impl_debug_val_numeric {
   };
 }
 
-impl_debug_val_numeric!(f32, 0.1, "{:.3}");
-impl_debug_val_numeric!(f64, 0.1, "{:.3}");
-impl_debug_val_numeric!(i32, 1.0, "{}");
-impl_debug_val_numeric!(u32, 1.0, "{}");
-impl_debug_val_numeric!(i16, 1.0, "{}");
-impl_debug_val_numeric!(u16, 1.0, "{}");
-impl_debug_val_numeric!(usize, 1.0, "{}");
-impl_debug_val_numeric!(isize, 1.0, "{}");
+impl_debug_val_numeric!(f32, 0.01, "{:.3}");
+impl_debug_val_numeric!(f64, 0.01, "{:.3}");
+impl_debug_val_numeric!(i32, 0.1, "{}");
+impl_debug_val_numeric!(u32, 0.1, "{}");
+impl_debug_val_numeric!(i16, 0.1, "{}");
+impl_debug_val_numeric!(u16, 0.1, "{}");
+impl_debug_val_numeric!(usize, 0.1, "{}");
+impl_debug_val_numeric!(isize, 0.1, "{}");
 
-impl_debug_val!(bool, "{}", |self, ui, metadata, _params| {
+impl_debug_val!(bool, "{}", |self| format!("{}", self), |self, ui, metadata, _params| {
   if metadata.app_controlled {
     let text = if *self { "true" } else { "false" };
     ui.add(Label::new(RichText::new(text).monospace()));
@@ -1253,7 +1597,7 @@ impl_debug_val!(bool, "{}", |self, ui, metadata, _params| {
   }
 });
 
-impl_debug_val!(String, "{}", |self, ui, metadata, params| {
+impl_debug_val!(String, "{}", |self| format!("{:?}", self), |self, ui, metadata, params| {
   if metadata.app_controlled {
     if self.is_empty() {
       ui.add(Label::new(RichText::new("(empty)").weak()).truncate());
@@ -1276,15 +1620,35 @@ impl_debug_val!(String, "{}", |self, ui, metadata, params| {
   }
 });
 
-impl_debug_val!(Color32, "{:?}", |self, ui, metadata, _params| {
-  if metadata.app_controlled {
-    ui.add(Label::new(RichText::new(format!("{:?}", *self)).monospace()));
-  } else {
-    egui::color_picker::color_edit_button_srgba(ui, self, egui::color_picker::Alpha::Opaque);
+impl_debug_val!(
+  Color32,
+  "{:?}",
+  |self| {
+    let [r, g, b, a] = self.to_array();
+    if a == 255 {
+      format!("Color32::from_rgb({r}, {g}, {b})")
+    } else {
+      format!("Color32::from_rgba_premultiplied({r}, {g}, {b}, {a})")
+    }
+  },
+  |self, ui, metadata, _params| {
+    if metadata.app_controlled {
+      ui.add(Label::new(RichText::new(format!("{:?}", *self)).monospace()));
+    } else {
+      egui::color_picker::color_edit_button_srgba(ui, self, egui::color_picker::Alpha::OnlyBlend);
+      ui.label("r:");
+      ui.add(DragValue::new(&mut self[0]).speed(0.1));
+      ui.label("g:");
+      ui.add(DragValue::new(&mut self[1]).speed(0.1));
+      ui.label("b:");
+      ui.add(DragValue::new(&mut self[2]).speed(0.1));
+      ui.label("a:");
+      ui.add(DragValue::new(&mut self[3]).speed(0.1));
+    }
   }
-});
+);
 
-impl_debug_val!(Vec2, "{:?}", |self, ui, metadata, params| {
+impl_debug_val!(Vec2, "{:?}", |self| format!("vec2({:.3}, {:.3})", self.x, self.y), |self, ui, metadata, params| {
   if metadata.app_controlled {
     ui.add(Label::new(RichText::new(format!("x: {:.3} y: {:.3}", self.x, self.y)).monospace()));
   } else {
@@ -1296,7 +1660,7 @@ impl_debug_val!(Vec2, "{:?}", |self, ui, metadata, params| {
   }
 });
 
-impl_debug_val!(Pos2, "{:?}", |self, ui, metadata, params| {
+impl_debug_val!(Pos2, "{:?}", |self| format!("pos2({:.3}, {:.3})", self.x, self.y), |self, ui, metadata, params| {
   if metadata.app_controlled {
     ui.add(Label::new(RichText::new(format!("x: {:.3} y: {:.3}", self.x, self.y)).monospace()));
   } else {
@@ -1308,41 +1672,108 @@ impl_debug_val!(Pos2, "{:?}", |self, ui, metadata, params| {
   }
 });
 
-impl_debug_val!(TSTransform, "{:?}", |self, ui, metadata, _params| {
-  if metadata.app_controlled {
-    ui.add(Label::new(
-      RichText::new(format!("tx: {:.3} ty: {:.3} scale: {:.3}", self.translation.x, self.translation.y, self.scaling))
+impl_debug_val!(
+  TSTransform,
+  "{:?}",
+  |self| format!(
+    "TSTransform {{ translation: vec2({:.3}, {:.3}), scaling: {:.3} }}",
+    self.translation.x, self.translation.y, self.scaling
+  ),
+  |self, ui, metadata, _params| {
+    if metadata.app_controlled {
+      ui.add(Label::new(
+        RichText::new(format!(
+          "tx: {:.3} ty: {:.3} scale: {:.3}",
+          self.translation.x, self.translation.y, self.scaling
+        ))
         .monospace(),
-    ));
-  } else {
-    ui.label("tx:");
-    ui.add(DragValue::new(&mut self.translation.x).speed(0.1));
-    ui.label("ty:");
-    ui.add(DragValue::new(&mut self.translation.y).speed(0.1));
-    ui.label("scale:");
-    ui.add(DragValue::new(&mut self.scaling).speed(0.01));
+      ));
+    } else {
+      ui.label("tx:");
+      ui.add(DragValue::new(&mut self.translation.x).speed(0.1));
+      ui.label("ty:");
+      ui.add(DragValue::new(&mut self.translation.y).speed(0.1));
+      ui.label("scale:");
+      ui.add(DragValue::new(&mut self.scaling).speed(0.01));
+    }
   }
-});
+);
 
-impl_debug_val!(Rect, "{:?}", |self, ui, metadata, _params| {
-  if metadata.app_controlled {
-    ui.add(Label::new(
-      RichText::new(format!("min ({:.3}, {:.3}) max ({:.3}, {:.3})", self.min.x, self.min.y, self.max.x, self.max.y))
-        .monospace(),
-    ));
-  } else {
-    ui.horizontal(|ui| {
-      ui.label("min x:");
-      ui.add(DragValue::new(&mut self.min.x).speed(0.1));
-      ui.label("y:");
-      ui.add(DragValue::new(&mut self.min.y).speed(0.1));
-      ui.label("max x:");
-      ui.add(DragValue::new(&mut self.max.x).speed(0.1));
-      ui.label("y:");
-      ui.add(DragValue::new(&mut self.max.y).speed(0.1));
-    });
+impl_debug_val!(
+  Rect,
+  "{:?}",
+  |self| format!(
+    "Rect::from_min_max(pos2({:.3}, {:.3}), pos2({:.3}, {:.3}))",
+    self.min.x, self.min.y, self.max.x, self.max.y
+  ),
+  |self, ui, metadata, _params| {
+    if metadata.app_controlled {
+      ui.add(Label::new(
+        RichText::new(format!("min ({:.3}, {:.3}) max ({:.3}, {:.3})", self.min.x, self.min.y, self.max.x, self.max.y))
+          .monospace(),
+      ));
+    } else {
+      ui.horizontal(|ui| {
+        ui.label("min x:");
+        ui.add(DragValue::new(&mut self.min.x).speed(0.1));
+        ui.label("y:");
+        ui.add(DragValue::new(&mut self.min.y).speed(0.1));
+        ui.label("max x:");
+        ui.add(DragValue::new(&mut self.max.x).speed(0.1));
+        ui.label("y:");
+        ui.add(DragValue::new(&mut self.max.y).speed(0.1));
+      });
+    }
   }
-});
+);
+impl_debug_val!(
+  Shadow,
+  "{:?}",
+  |self| {
+    let [r, g, b, a] = self.color.to_array();
+    format!(
+      "Shadow {{ offset: [{}, {}], blur: {}, spread: {}, color: Color32::from_rgba_premultiplied({r}, {g}, {b}, {a}) }}",
+      self.offset[0], self.offset[1], self.blur, self.spread
+    )
+  },
+  |self, ui, metadata, _params| {
+    if metadata.app_controlled {
+      ui.add(Label::new(
+        RichText::new(format!(
+          "offset: [{}, {}] blur: {} spread: {} color: {:?}",
+          self.offset[0], self.offset[1], self.blur, self.spread, self.color
+        ))
+        .monospace(),
+      ));
+    } else {
+      // ui.horizontal(|ui| {
+      ui.label("x:");
+      let mut offset_x = self.offset[0] as i32;
+      ui.add(DragValue::new(&mut offset_x).speed(0.01));
+      let mut offset_y = self.offset[1] as i32;
+      ui.label("y:");
+      ui.add(DragValue::new(&mut offset_y).speed(0.01));
+      self.offset[0] = offset_x as i8;
+      self.offset[1] = offset_y as i8;
+
+      ui.label("blur:");
+      let mut blur = self.blur as i32;
+      ui.add(DragValue::new(&mut blur).range(0..=64).speed(0.1));
+      self.blur = blur as u8;
+
+      ui.label("spread:");
+      let mut spread = self.spread as i32;
+      ui.add(DragValue::new(&mut spread).range(0..=64).speed(0.1));
+      self.spread = spread as u8;
+
+      ui.label("color:");
+      let mut color = self.color;
+      egui::color_picker::color_edit_button_srgba(ui, &mut color, egui::color_picker::Alpha::OnlyBlend);
+      self.color = color;
+      // });
+    }
+  }
+);
 
 impl<T: Clone + DebugVal + Send + Sync + 'static> DebugVal for Option<T> {
   fn render_value_ui(&mut self, ui: &mut Ui, metadata: &DebugValMetadata, params: &ValParams) {
@@ -1361,6 +1792,13 @@ impl<T: Clone + DebugVal + Send + Sync + 'static> DebugVal for Option<T> {
     }
   }
 
+  fn as_rust_literal(&self) -> String {
+    match self {
+      Some(inner) => format!("Some({})", inner.as_rust_literal()),
+      None => "None".into(),
+    }
+  }
+
   fn clone_boxed(&self) -> Box<dyn DebugVal> {
     Box::new(self.clone())
   }
@@ -1372,7 +1810,7 @@ impl<T: Clone + DebugVal + Send + Sync + 'static> DebugVal for Option<T> {
   }
 }
 
-impl_debug_val!(Range<i32>, "{:?}", |self, ui, metadata, _params| {
+impl_debug_val!(Range<i32>, "{:?}", |self| format!("{}..{}", self.start, self.end), |self, ui, metadata, _params| {
   if metadata.app_controlled {
     ui.add(Label::new(RichText::new(format!("{}..{}", self.start, self.end)).monospace()));
   } else {

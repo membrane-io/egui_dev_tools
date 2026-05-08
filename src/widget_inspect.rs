@@ -82,6 +82,7 @@ impl ResolvedFrame {
       || crate_ == "js_sys"
       || crate_ == "backtrace"
       || crate_ == "<unknown>"
+      || crate_ == "subsecond"
   }
 }
 
