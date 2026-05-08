@@ -1,8 +1,8 @@
 [package]
 name = "egui_dev_tools"
-version = "0.1.0"
-edition = "2024"
-license = "MIT OR Apache-2.0"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
 description = "Devtools for egui - Inspect widgets and map them back to source code"
 repository = "https://github.com/membrane-io/egui_dev_tools"
 authors = ["Juan Campa <juan@membrane.io>"]
@@ -17,24 +17,18 @@ widget-inspect = []
 logging = ["dep:egui_tracing"]
 
 [dependencies]
-egui = { git = "https://github.com/emilk/egui", branch = "main" }
+egui = { workspace = true }
 egui_tracing = { path = "../egui_tracing", default-features = false, features = ["log", "wasmbind"], optional = true }
-egui_table = "0.7"
-profiling = { version = "1" }
-log = "~0.4"
+egui_table = { workspace = true }
+profiling = { workspace = true }
+log = { workspace = true }
 regex = "1"
-
-[patch.crates-io]
-egui = { git = "https://github.com/emilk/egui", branch = "main" }
-
-[dev-dependencies]
-egui_demo_lib = { git = "https://github.com/emilk/egui", branch = "main" }
-eframe = { git = "https://github.com/emilk/egui", branch = "main" }
-env_logger = "0.11"
+serde = { workspace = true }
+subsecond = { workspace = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 backtrace = "~0.3"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-wasm-bindgen = "0.2"
-js-sys = "0.3"
+wasm-bindgen = { workspace = true }
+js-sys = { workspace = true }
