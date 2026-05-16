@@ -108,10 +108,6 @@ impl<'a> SymbolExtractor<'a> {
       None
     };
 
-    if type_.is_none() {
-      log::info!("type_ is none for symbol: {}", self.input);
-    }
-
     Ok(Symbol {
       function: function.unwrap_or("<unknown>".to_string()),
       type_: type_.unwrap_or("<unknown-type>").to_string(),

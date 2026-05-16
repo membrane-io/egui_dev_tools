@@ -680,8 +680,9 @@ impl DebugValsPlugin {
           paint_dashed_rect(&ctx.debug_painter(), group.rect, color);
         } else if let Some(pointer_pos) = ctx.input(|i| i.pointer.hover_pos()) {
           let dist = group.rect.distance_to_pos(pointer_pos);
-          if dist < 256.0 {
-            let alpha = ((1.0 - dist / 256.0) * 128.0) as u8;
+          let max_dist = radius * 3.0;
+          if dist < max_dist {
+            let alpha = ((1.0 - dist / max_dist) * 128.0) as u8;
             let faded = Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), alpha);
             paint_dashed_rect(&ctx.debug_painter(), group.rect, faded);
           }

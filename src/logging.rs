@@ -132,3 +132,15 @@ pub fn show_logs(ui: &mut egui::Ui) {
   let collector = EVENT_COLLECTOR.with(|c| c.clone());
   ui.add(egui_tracing::Logs::new(collector));
 }
+
+pub use egui_tracing::tracing::{CollectedEvent, Level};
+
+/// Returns (total_event_count, warn_or_error_count_since_index).
+pub fn count_warnings_since(since: usize) -> (usize, usize) {
+  EVENT_COLLECTOR.with(|c| c.count_at_level_since(since, egui_tracing::tracing::Level::WARN))
+}
+
+/// Returns the most recent warn/error events since `since` index (most recent first, up to `limit`).
+pub fn recent_warnings_since(since: usize, limit: usize) -> Vec<CollectedEvent> {
+  EVENT_COLLECTOR.with(|c| c.recent_at_level_since(since, egui_tracing::tracing::Level::WARN, limit))
+}
