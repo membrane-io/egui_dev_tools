@@ -7,10 +7,19 @@ use egui_tracing::tracing_subscriber::prelude::*;
 
 const MAX_LOG_EVENTS: usize = 5_000;
 
-thread_local! {
-  pub static EVENT_COLLECTOR: egui_tracing::EventCollector =
-    egui_tracing::EventCollector::default().with_max_events(Some(MAX_LOG_EVENTS));
-  static LOG_CONTEXT: RefCell<Vec<(&'static str, ContextValue)>> = const { RefCell::new(Vec::new()) };
+hot_static::hot_static!(static EVENT_COLLECTOR: egui_tracing::EventCollector);
+hot_static::hot_static!(static LOG_CONTEXT: RefCell<Vec<(&'static str, ContextValue)>>);
+
+/// The global event collector. Lazily initialized on first access and recovered
+/// after a subsecond hot-patch via [`hot_static`].
+pub fn event_collector() -> &'static egui_tracing::EventCollector {
+    EVENT_COLLECTOR.get_or_init(|| {
+        egui_tracing::EventCollector::default().with_max_events(Some(MAX_LOG_EVENTS))
+    })
+}
+
+fn log_context() -> &'static RefCell<Vec<(&'static str, ContextValue)>> {
+    LOG_CONTEXT.get_or_init(|| RefCell::new(Vec::new()))
 }
 
 #[derive(Clone)]
@@ -60,7 +69,7 @@ pub struct LogScope {
 
 impl LogScope {
     pub fn new(key: &'static str, value: impl Into<ContextValue>) -> Self {
-        LOG_CONTEXT.with(|ctx| ctx.borrow_mut().push((key, value.into())));
+        log_context().borrow_mut().push((key, value.into()));
         Self { _private: () }
     }
 
@@ -71,18 +80,14 @@ impl LogScope {
 
 impl Drop for LogScope {
     fn drop(&mut self) {
-        LOG_CONTEXT.with(|ctx| {
-            ctx.borrow_mut().pop();
-        });
+        log_context().borrow_mut().pop();
     }
 }
 
 fn drain_context_fields(fields: &mut Vec<(String, String)>) {
-    LOG_CONTEXT.with(|ctx| {
-        for (key, value) in ctx.borrow().iter() {
-            fields.push(((*key).to_owned(), value.to_string()));
-        }
-    });
+    for (key, value) in log_context().borrow().iter() {
+        fields.push(((*key).to_owned(), value.to_string()));
+    }
 }
 
 struct MultiLogger {
@@ -99,7 +104,7 @@ impl log::Log for MultiLogger {
 
         let mut event = egui_tracing::tracing::CollectedEvent::from_log_record(record);
         drain_context_fields(&mut event.fields);
-        EVENT_COLLECTOR.with(|c| c.collect(event));
+        event_collector().collect(event);
     }
 
     fn flush(&self) {
@@ -118,27 +123,27 @@ pub fn init(inner_logger: Box<dyn log::Log>) {
     // set_global_default (succeeds) then LogTracer::init (fails because
     // our logger is already set). We ignore the error — the subscriber
     // is installed and log events flow through MultiLogger directly.
-    let collector = EVENT_COLLECTOR.with(|c| c.clone());
+    let collector = event_collector().clone();
     let _ = egui_tracing::tracing_subscriber::registry()
         .with(collector)
         .try_init();
 }
 
 pub fn set_frame(frame: u64) {
-    EVENT_COLLECTOR.with(|c| c.set_frame(frame));
+    event_collector().set_frame(frame);
 }
 
 pub fn begin_frame() {
-    EVENT_COLLECTOR.with(|c| c.begin_frame());
+    event_collector().begin_frame();
 }
 
 pub fn end_frame() {
-    EVENT_COLLECTOR.with(|c| c.end_frame());
+    event_collector().end_frame();
 }
 
 pub fn show_logs(ui: &mut egui::Ui) {
     // ui.set_min_size(ui.max_rect().size());
-    let collector = EVENT_COLLECTOR.with(|c| c.clone());
+    let collector = event_collector().clone();
     let output = egui_tracing::Logs::new(collector).show(ui);
     if let Some(source) = output.goto_source {
         crate::open_file(
@@ -156,13 +161,12 @@ pub use egui_tracing::tracing::{CollectedEvent, Level};
 
 /// Returns (total_event_count, warn_or_error_count_since_index).
 pub fn count_warnings_since(since: usize) -> (usize, usize) {
-    EVENT_COLLECTOR.with(|c| c.count_at_level_since(since, egui_tracing::tracing::Level::WARN))
+    event_collector().count_at_level_since(since, egui_tracing::tracing::Level::WARN)
 }
 
 /// Returns the most recent warn/error events since `since` index (most recent first, up to `limit`).
 pub fn recent_warnings_since(since: usize, limit: usize) -> Vec<CollectedEvent> {
-    EVENT_COLLECTOR
-        .with(|c| c.recent_at_level_since(since, egui_tracing::tracing::Level::WARN, limit))
+    event_collector().recent_at_level_since(since, egui_tracing::tracing::Level::WARN, limit)
 }
 
 type OnClickFn = Box<dyn Fn(&egui::Context) + Send + Sync>;

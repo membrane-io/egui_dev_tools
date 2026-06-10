@@ -441,7 +441,10 @@ impl WidgetInspect {
             let callstack = resolved
                 .iter()
                 .map(|frame| match frame {
+                    #[cfg(target_arch = "wasm32")]
                     ParsedFrame::Parsed(location) => location.original.to_string(),
+                    #[cfg(not(target_arch = "wasm32"))]
+                    ParsedFrame::Parsed(location) => format!("{:?}", location.location),
                     ParsedFrame::Failed(error) => format!("Failed to parse frame: {}", error),
                 })
                 .collect::<Vec<_>>()
