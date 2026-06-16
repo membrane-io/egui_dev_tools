@@ -748,7 +748,7 @@ impl DebugValsPlugin {
 
         let hover_size = vec2(INDICATOR_RADIUS_HOVER * 2.0, INDICATOR_RADIUS_HOVER * 2.0);
         let mut placer = LabelPlacer::new();
-        let screen_rect = ctx.screen_rect();
+        let screen_rect = ctx.content_rect();
 
         for (widget_id, group) in &groups {
             if group.rect == Rect::NOTHING || !screen_rect.intersects(group.rect) {
