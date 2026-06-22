@@ -6,8 +6,8 @@ use egui::epaint::{
     text::{LayoutJob, TextFormat},
 };
 use egui::{
-    Align, Context, CursorIcon, Event, Id, Key, MouseWheelUnit, Painter, Plugin, RawInput, Shape,
-    Ui, WidgetRect,
+    Align, Context, CursorIcon, Event, Id, Key, LayerId, MouseWheelUnit, Painter, Plugin, RawInput,
+    Shape, Ui, WidgetRect,
 };
 
 pub struct Config {
@@ -526,7 +526,7 @@ impl WidgetInspect {
         }
 
         // Paint border of selected widget
-        let (id, _, rect, _, _, interact_rect) = selected;
+        let (id, _, rect, layer_id, _, interact_rect) = selected;
         let stroke = (1.0, Color32::MAGENTA.gamma_multiply(0.7));
         painter.rect_stroke(interact_rect, 0.0, stroke, StrokeKind::Outside);
         if rect != interact_rect {
@@ -573,6 +573,7 @@ impl WidgetInspect {
             count,
             pointer_pos,
             id,
+            layer_id,
             rect,
             resolved,
             most_significant_frame,
@@ -588,6 +589,7 @@ fn paint_info(
     count: usize,
     pointer_pos: Pos2,
     id: Id, // TODO: show Id
+    layer_id: LayerId,
     rect: Rect,
     callstack: Vec<ParsedFrame>,
     most_significant_frame: usize,
@@ -671,7 +673,21 @@ fn paint_info(
     {
         let stroke = Stroke::new(1.0, strong_small.color);
         header_job.append(&format!("Widget "), 0.0, weak_small.clone());
-        header_job.append(&format!("{:?} ", id), 0.0, strong_small.clone());
+        header_job.append(
+            &format!("{:?} ", id.short_debug_format()),
+            0.0,
+            strong_small.clone(),
+        );
+        header_job.append(&format!("Layer "), 0.0, weak_small.clone());
+        header_job.append(
+            &format!(
+                "{:?} {:?}",
+                layer_id.order,
+                layer_id.id.short_debug_format()
+            ),
+            0.0,
+            strong_small.clone(),
+        );
         header_job.append(&format!("#{index}"), 0.0, strong_small.clone());
         header_job.append(&format!(" of {count}"), 0.0, weak_small.clone());
         header_job.append("     Scroll or ↑↓ to select\n", 0.0, weak_small.clone());
@@ -747,7 +763,7 @@ fn paint_info(
                 return (location.original.clone(), format);
             }
             let indent = if location.inlined { "  " } else { "" };
-            let max_function_len = 256usize
+            let max_function_len = 80usize
                 .saturating_sub(location.symbol.type_().len())
                 .max(10);
 
