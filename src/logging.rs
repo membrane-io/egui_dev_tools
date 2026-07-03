@@ -5,7 +5,7 @@ use std::fmt;
 use egui::Label;
 use egui_tracing::tracing_subscriber::prelude::*;
 
-const MAX_LOG_EVENTS: usize = 5_000;
+const MAX_LOG_EVENTS: usize = 50_000;
 
 hot_static::hot_static!(static EVENT_COLLECTOR: egui_tracing::EventCollector);
 hot_static::hot_static!(static LOG_CONTEXT: RefCell<Vec<(&'static str, ContextValue)>>);
