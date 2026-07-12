@@ -1,6 +1,6 @@
 use eframe::egui::{self, Ui};
 use egui_demo_lib::DemoWindows;
-use egui_dev_tools::{Config, WidgetInspect};
+use egui_dev_tools::WidgetInspect;
 
 fn main() -> eframe::Result {
     env_logger::init();
@@ -15,7 +15,7 @@ fn main() -> eframe::Result {
         options,
         Box::new(|cc| {
             // Add the widget inspector plugin
-            let plugin = WidgetInspect::new(Config::new(None));
+            let plugin = WidgetInspect::new();
             cc.egui_ctx.add_plugin(plugin);
 
             Ok(Box::new(DemoApp::default()))

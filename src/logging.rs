@@ -157,6 +157,16 @@ pub fn show_logs(ui: &mut egui::Ui) {
     }
 }
 
+/// Returns the most recent `jsx::*` trace events (up to `limit`) without scanning the full log buffer.
+pub fn recent_jsx_trace_events(limit: usize) -> Vec<CollectedEvent> {
+    event_collector().recent_jsx_events(limit)
+}
+
+/// Count of `jsx::*` events in the collector's jsx ring buffer.
+pub fn jsx_trace_event_count() -> usize {
+    event_collector().jsx_event_count()
+}
+
 pub use egui_tracing::tracing::{CollectedEvent, Level};
 
 /// Returns (total_event_count, warn_or_error_count_since_index).

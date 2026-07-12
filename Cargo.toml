@@ -27,6 +27,11 @@ serde = { workspace = true }
 subsecond = { workspace = true }
 hot_static = { workspace = true }
 
+[dev-dependencies]
+eframe = { workspace = true }
+env_logger = "0.11"
+egui_demo_lib = { path = "../egui/crates/egui_demo_lib", default-features = false }
+
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 backtrace = "~0.3"
 

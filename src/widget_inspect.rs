@@ -1,13 +1,13 @@
 use crate::symbol_parser::Symbol;
 use crate::{SourceLocation, open_file};
-use egui::emath::{Align2, OrderedFloat, Pos2, Rect, Vec2, vec2};
+use egui::emath::{Align2, OrderedFloat, Pos2, Rect, Vec2, pos2, vec2};
 use egui::epaint::{
     Color32, FontId, Stroke, StrokeKind,
     text::{LayoutJob, TextFormat},
 };
 use egui::{
     Align, Context, CursorIcon, Event, Id, Key, LayerId, MouseWheelUnit, Painter, Plugin, RawInput,
-    Shape, Ui, WidgetRect,
+    Shape, Spacing, Ui, WidgetRect,
 };
 
 pub struct Config {
@@ -150,8 +150,8 @@ pub struct WidgetInspect {
     /// Whether to copy the current callstack to the clipboard. (i.e. Copy command received)
     should_copy_to_clipboard: bool,
 
-    /// Captured callstacks for widgets under the pointer.
-    widgets: Vec<(Id, Callstack)>,
+    /// Captured callstacks and `Ui` spacing for widgets under the pointer.
+    widgets: Vec<(Id, Callstack, Spacing)>,
 
     /// The top location of the widget under the pointer. Used to reset the selected widget if the user moves the pointer to some other part of the UI.
     last_top_location: Option<Id>,
@@ -333,7 +333,7 @@ impl Plugin for WidgetInspect {
     }
 
     #[cfg(debug_assertions)]
-    fn on_widget_under_pointer(&mut self, _ctx: &Context, widget: &WidgetRect) {
+    fn on_widget_under_pointer(&mut self, _ctx: &Context, widget: &WidgetRect, spacing: &Spacing) {
         if self.config.clickable_only && !widget.sense.senses_click() {
             return;
         }
@@ -341,12 +341,13 @@ impl Plugin for WidgetInspect {
         // call because it's the callstack that creates it. The second call contains the final
         // rect but it doesn't matter since we get it at the end of the frame directly from
         // `Context`.
-        if let Some(index) = self.widgets.iter().position(|(id, _)| *id == widget.id) {
+        if let Some(index) = self.widgets.iter().position(|(id, ..)| *id == widget.id) {
             let removed = self.widgets.remove(index);
             self.widgets.push(removed);
             return;
         }
-        self.widgets.push((widget.id, Callstack::capture()));
+        self.widgets
+            .push((widget.id, Callstack::capture(), spacing.clone()));
     }
 }
 
@@ -382,7 +383,7 @@ impl WidgetInspect {
         // Read responses for all widgets under the pointer
         let mut widgets = std::mem::take(widgets)
             .into_iter()
-            .filter_map(|(id, callstack)| {
+            .filter_map(|(id, callstack, spacing)| {
                 let (sense, interact_rect) = ctx
                     .viewport(|viewport| viewport.this_pass.widgets.get(id).copied())
                     .map(|widget| (widget.sense, widget.interact_rect))
@@ -398,23 +399,24 @@ impl WidgetInspect {
                             layer,
                             sense,
                             interact_rect.unwrap_or(rect),
+                            spacing,
                         )
                     })
             })
             .collect::<Vec<_>>();
 
         // Transform rects to screen space.
-        for (_, _, rect, layer, _, interact_rect) in widgets.iter_mut() {
+        for (_, _, rect, layer, _, interact_rect, _) in widgets.iter_mut() {
             let transform = ctx.layer_transform_to_global(*layer).unwrap_or_default();
             *rect = transform * *rect;
             *interact_rect = transform * *interact_rect;
         }
 
         // Sort by area. Does this help?
-        widgets.sort_by_key(|(_, _, rect, _, _, _)| OrderedFloat(rect.area()));
+        widgets.sort_by_key(|(_, _, rect, _, _, _, _)| OrderedFloat(rect.area()));
 
         // Reset the selected widget if the user moves the pointer to some other part of the UI
-        let top_location = widgets.first().map(|(id, _, _, _, _, _)| *id);
+        let top_location = widgets.first().map(|(id, ..)| *id);
         if top_location != *last_top_location {
             *selected_widget = 0;
             *last_top_location = top_location;
@@ -520,13 +522,13 @@ impl WidgetInspect {
         // Paint border of non-selected widgets
         let count = widgets.len();
         let opacity = (1.0 / count as f32).max(1.0 / 255.0).min(0.2);
-        for (_, _, rect, _, _, _) in widgets {
+        for (_, _, rect, _, _, _, _) in widgets {
             let stroke = (1.0, Color32::LIGHT_BLUE.gamma_multiply(opacity));
             painter.rect_stroke(rect, 0.0, stroke, StrokeKind::Outside);
         }
 
         // Paint border of selected widget
-        let (id, _, rect, layer_id, _, interact_rect) = selected;
+        let (id, _, rect, layer_id, _, interact_rect, spacing) = selected;
         let stroke = (1.0, Color32::MAGENTA.gamma_multiply(0.7));
         painter.rect_stroke(interact_rect, 0.0, stroke, StrokeKind::Outside);
         if rect != interact_rect {
@@ -575,6 +577,7 @@ impl WidgetInspect {
             id,
             layer_id,
             rect,
+            &spacing,
             resolved,
             most_significant_frame,
             shift_pressed,
@@ -591,6 +594,7 @@ fn paint_info(
     id: Id, // TODO: show Id
     layer_id: LayerId,
     rect: Rect,
+    spacing: &Spacing,
     callstack: Vec<ParsedFrame>,
     most_significant_frame: usize,
     shift_pressed: bool,
@@ -943,7 +947,99 @@ fn paint_info(
         text_color,
     );
 
-    vec![header_rect, body_rect]
+    let spacing_rect = paint_spacing_box(painter, spacing, rect);
+
+    vec![header_rect, body_rect, spacing_rect]
+}
+
+/// Paint the `Ui` spacing of the selected widget in a box adjacent to it.
+///
+/// Tries each side of the widget in order (top, right, bottom, left) and uses the first one with
+/// enough room within the viewport. The box is always clamped to stay inside the viewport.
+fn paint_spacing_box(painter: &Painter, spacing: &Spacing, widget_rect: Rect) -> Rect {
+    const MARGIN: f32 = 8.0;
+    const GAP: f32 = 4.0;
+
+    let font = FontId::monospace(10.0);
+    let strong = TextFormat {
+        font_id: font.clone(),
+        color: Color32::WHITE,
+        valign: Align::Center,
+        ..Default::default()
+    };
+    let weak = TextFormat {
+        font_id: font,
+        color: Color32::WHITE.gamma_multiply(0.6),
+        valign: Align::Center,
+        ..Default::default()
+    };
+
+    let rows = [
+        ("interact size:", spacing.interact_size),
+        ("item spacing:", spacing.item_spacing),
+    ];
+
+    // Pad labels and values so the values align horizontally (the font is monospace)
+    let label_width = rows.iter().map(|(label, _)| label.len()).max().unwrap_or(0);
+    let x_values = rows.map(|(_, value)| format!("{:.1}", value.x));
+    let y_values = rows.map(|(_, value)| format!("{:.1}", value.y));
+    let x_width = x_values.iter().map(|value| value.len()).max().unwrap_or(0);
+    let y_width = y_values.iter().map(|value| value.len()).max().unwrap_or(0);
+
+    let mut job = LayoutJob::default();
+    for (i, (label, _)) in rows.iter().enumerate() {
+        job.append(&format!("{label:<label_width$} "), 0.0, weak.clone());
+        job.append(
+            &format!("{:>x_width$} x {:>y_width$}", x_values[i], y_values[i]),
+            0.0,
+            strong.clone(),
+        );
+        if i + 1 < rows.len() {
+            job.append("\n", 0.0, strong.clone());
+        }
+    }
+
+    let galley = painter.layout_job(job);
+    let size = galley.size() + 2.0 * Vec2::splat(MARGIN);
+
+    let viewport = painter.ctx().viewport_rect();
+    let center = widget_rect.center();
+
+    // Anchor point on each side. We pick the first side (top, right, bottom, left) that has enough
+    // room within the viewport for the box.
+    let top = (widget_rect.top() - viewport.top() >= size.y + GAP)
+        .then(|| pos2(center.x - size.x / 2.0, widget_rect.top() - GAP - size.y));
+    let right = (viewport.right() - widget_rect.right() >= size.x + GAP)
+        .then(|| pos2(widget_rect.right() + GAP, center.y - size.y / 2.0));
+    let bottom = (viewport.bottom() - widget_rect.bottom() >= size.y + GAP)
+        .then(|| pos2(center.x - size.x / 2.0, widget_rect.bottom() + GAP));
+    let left = (widget_rect.left() - viewport.left() >= size.x + GAP)
+        .then(|| pos2(widget_rect.left() - GAP - size.x, center.y - size.y / 2.0));
+
+    // Fall back to the top edge of the widget if no side has enough room.
+    let min = top
+        .or(right)
+        .or(bottom)
+        .or(left)
+        .unwrap_or_else(|| pos2(center.x - size.x / 2.0, widget_rect.top() - GAP - size.y));
+
+    // Clamp so the box always stays fully within the viewport.
+    let min = pos2(
+        min.x.clamp(viewport.left(), viewport.right() - size.x),
+        min.y.clamp(viewport.top(), viewport.bottom() - size.y),
+    );
+    let box_rect = Rect::from_min_size(min, size);
+
+    let bg_fill = Color32::from_black_alpha(180);
+    let bg_stroke = Stroke::new(1.0, Color32::WHITE.gamma_multiply(0.1));
+    painter.rect(box_rect, 0.0, bg_fill, bg_stroke, StrokeKind::Outside);
+    painter.galley(
+        box_rect.left_top() + Vec2::splat(MARGIN),
+        galley,
+        Color32::WHITE,
+    );
+
+    box_rect
 }
 
 /// Given a list of rects, cut a hole in them. In other words, any rect that intersects with the hole is replaced with

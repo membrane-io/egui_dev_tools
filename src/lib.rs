@@ -140,7 +140,7 @@ fn file_opener_key() -> Id {
 /// that is merely missing its leading `/` from a path that is relative to the workspace root.
 ///
 /// Example for web that opens the file in cursor:
-/// ```
+/// ```ignore
 /// Some(Box::new(|ctx, source| {
 ///   let manifest_dir = env!("CARGO_MANIFEST_DIR");
 ///   let abs_path = if source.path.starts_with('/') {
