@@ -220,6 +220,11 @@ impl LogNotificationPlugin {
         self
     }
 
+    /// Set anchor offset
+    pub fn offset(&mut self, offset: egui::Vec2) {
+        self.offset = offset;
+    }
+
     /// Override the screen anchor for the notification (default: right-bottom).
     pub fn anchor(mut self, anchor: egui::Align2, offset: egui::Vec2) -> Self {
         self.anchor = anchor;

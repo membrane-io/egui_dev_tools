@@ -15,6 +15,10 @@ default = ["vals", "widget-inspect"]
 vals = []
 widget-inspect = []
 logging = ["dep:egui_tracing"]
+# Resolve the widget picker's callstacks against the running module's own DWARF, and read
+# each frame's locals live out of the shadow stack. wasm32-only (see `src/dwarf.rs`), and it
+# carries `dwarf-explorer`'s `unsafe`: `self-inspect` reads and writes this process's memory.
+dwarf = ["dep:dwarf-explorer-egui", "dep:rustc-demangle"]
 
 [dependencies]
 egui = { workspace = true }
@@ -38,3 +42,10 @@ backtrace = "~0.3"
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen = { workspace = true }
 js-sys = { workspace = true }
+# Live locals only exist on wasm: a native backtrace's addresses aren't module offsets into
+# any DWARF we hold, and there is no shadow stack to walk. Native keeps the `backtrace` path.
+dwarf-explorer-egui = { path = "dwarf-explorer/crates/dwarf-explorer-egui", features = ["self-inspect"], optional = true }
+# DWARF's `DW_AT_linkage_name` is the *mangled* symbol, and the crate name — which is what the
+# APP/EGUI/STD frame filter keys on — is only recoverable by demangling it. (`DW_AT_name` is
+# the short name: `create_widget`, `ui`.) Already in the tree via `backtrace`.
+rustc-demangle = { version = "0.1", optional = true }

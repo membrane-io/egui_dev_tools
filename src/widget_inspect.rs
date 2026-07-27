@@ -108,7 +108,7 @@ impl ResolvedFrame {
 /// frame of the original callstack can be mapped to multiple locations in the source code due to
 /// inlining.
 #[derive(Debug)]
-enum ParsedFrame {
+pub(crate) enum ParsedFrame {
     Parsed(ResolvedFrame),
     Failed(String),
 }
@@ -130,9 +130,50 @@ impl ParsedFrame {
     }
 }
 
+#[cfg(all(feature = "dwarf", target_arch = "wasm32"))]
+use crate::dwarf::Dwarf;
+
+/// No DWARF on this target or without the feature: the picker keeps its `Error.stack` path
+/// and every call here is a no-op. A stand-in rather than `#[cfg]` at each use site, so
+/// `render` and the hooks stay one code path.
+#[cfg(not(all(feature = "dwarf", target_arch = "wasm32")))]
+#[derive(Default)]
+struct Dwarf;
+
+#[cfg(not(all(feature = "dwarf", target_arch = "wasm32")))]
+impl Dwarf {
+    fn warm_index(&mut self, _ctx: &Context) {}
+    fn pin(&mut self, _ctx: &Context, _id: Id) {}
+    fn status(&self) -> Option<String> {
+        None
+    }
+}
+
+/// DWARF-resolved frames for this capture, or `None` to fall back to the `Error.stack` parse
+/// — which is what happens on native, without the feature, and while the index is still
+/// being walked.
+fn resolve_dwarf(dwarf: &mut Dwarf, callstack: &Callstack) -> Option<Vec<ParsedFrame>> {
+    #[cfg(all(feature = "dwarf", target_arch = "wasm32"))]
+    {
+        return dwarf.resolve(callstack.js_error());
+    }
+    #[cfg(not(all(feature = "dwarf", target_arch = "wasm32")))]
+    {
+        let _ = (dwarf, callstack);
+        None
+    }
+}
+
 pub struct WidgetInspect {
     /// Configuration
     config: Config,
+
+    /// The running module's own debug info, and the widget we're probing with it.
+    dwarf: Dwarf,
+
+    /// Whether the user asked to pin the selected widget (⌘-click) and read its locals live.
+    /// Separate from `clicked`, which opens the source instead.
+    pin_requested: bool,
 
     /// Whether the widget inspect is enabled.
     pub enabled: bool,
@@ -161,6 +202,10 @@ pub struct WidgetInspect {
 
     /// Rects where this plugin last painted its overlays.
     painted_rects: Vec<Rect>,
+
+    /// Keys whose press we swallowed, so we can swallow their release too. Otherwise the app
+    /// sees a release without a press and can end up in a stuck state.
+    consumed_keys: Vec<Key>,
 }
 
 impl WidgetInspect {
@@ -169,8 +214,20 @@ impl WidgetInspect {
     }
 
     pub fn new_with_config(config: Config) -> Self {
+        // Read our own debug info straight out of the page. Nothing has to hand it to us, so
+        // this works under `dev_hot.sh` too, where dx's glue loads the module itself. Cheap:
+        // `Db::from_bytes` copies the `.debug_*` sections and nothing more — the index is built
+        // lazily, a slice per frame, in `on_end_pass`.
+        let mut dwarf = Dwarf::default();
+        #[cfg(all(feature = "dwarf", target_arch = "wasm32"))]
+        if let Err(e) = dwarf.load() {
+            log::warn!("widget picker: no DWARF, falling back to Error.stack parsing ({e})");
+        }
+
         WidgetInspect {
             config,
+            dwarf,
+            pin_requested: false,
             enabled: false,
             selected_widget: 0,
             scroll_offset: 0.0,
@@ -180,10 +237,17 @@ impl WidgetInspect {
             last_top_location: None,
             open_frame_index: None,
             painted_rects: vec![],
+            consumed_keys: vec![],
         }
     }
 
     /// Get the rects where this plugin last painted its overlays.
+    fn consume_key(&mut self, key: Key) {
+        if !self.consumed_keys.contains(&key) {
+            self.consumed_keys.push(key);
+        }
+    }
+
     pub fn painted_rects(&self) -> &[Rect] {
         &self.painted_rects
     }
@@ -195,31 +259,55 @@ impl Plugin for WidgetInspect {
     }
 
     fn on_end_pass(&mut self, ui: &mut Ui) {
+        // Walk a slice of the DWARF each frame. The first callstack resolution needs the whole
+        // index, and doing it on demand would freeze the app for seconds on a large module.
+        self.dwarf.warm_index(ui.ctx());
         crate::hot_call(|| self.render(ui));
     }
 
     fn input_hook(&mut self, input: &mut RawInput) {
-        for event in input.events.iter() {
-            match event {
-                Event::Key {
-                    key: Key::I,
-                    repeat: false,
-                    pressed: true,
-                    modifiers,
-                    ..
-                } if modifiers.command => {
-                    self.enabled = !self.enabled;
-                }
-                _ => {}
+        input.events.retain(|e| {
+            // Swallow the release of every press we swallowed, even after we got disabled in
+            // between, so the app never sees a release without a matching press.
+            if let Event::Key {
+                key,
+                pressed: false,
+                ..
+            } = e
+                && let Some(index) = self.consumed_keys.iter().position(|consumed| consumed == key)
+            {
+                self.consumed_keys.swap_remove(index);
+                return false;
             }
-        }
-        if self.enabled {
-            input.events.retain(|e| {
-                match e {
+
+            if let Event::Key {
+                key: key @ Key::I,
+                repeat: false,
+                pressed: true,
+                modifiers,
+                ..
+            } = e
+                && modifiers.command
+            {
+                self.enabled = !self.enabled;
+                self.consume_key(*key);
+                return false;
+            }
+
+            if self.enabled {
+                let keep = match e {
                     // Ignore clicks
-                    Event::PointerButton { pressed, .. } => {
+                    Event::PointerButton {
+                        pressed, modifiers, ..
+                    } => {
                         if *pressed {
-                            self.clicked = true;
+                            // ⌘-click pins the widget and opens its live locals; a plain click
+                            // opens the source, as it always has.
+                            if modifiers.command {
+                                self.pin_requested = true;
+                            } else {
+                                self.clicked = true;
+                            }
                         }
                         false
                     }
@@ -325,11 +413,25 @@ impl Plugin for WidgetInspect {
                         }
                         _ => true,
                     },
+                    // The text that the keys we handle would otherwise type
+                    Event::Text(_) => false,
                     // Let everything else through
                     _ => true,
+                };
+                if !keep
+                    && let Event::Key {
+                        key,
+                        pressed: true,
+                        ..
+                    } = e
+                {
+                    self.consume_key(*key);
                 }
-            });
-        }
+                keep
+            } else {
+                true
+            }
+        });
     }
 
     #[cfg(debug_assertions)]
@@ -348,6 +450,17 @@ impl Plugin for WidgetInspect {
         }
         self.widgets
             .push((widget.id, Callstack::capture(), spacing.clone()));
+    }
+
+    /// The pinned widget, sampled from *inside* the call stack that builds it — the only place
+    /// its callers' locals are still on the shadow stack. Unlike `on_widget_under_pointer` this
+    /// fires wherever the pointer is, so the user can reach into the window and edit.
+    #[cfg(debug_assertions)]
+    fn on_probed_widget(&mut self, ctx: &Context, widget: &WidgetRect, _spacing: &Spacing) {
+        #[cfg(all(feature = "dwarf", target_arch = "wasm32"))]
+        crate::hot_call(|| self.dwarf.probed_widget_ui(ctx, widget));
+        #[cfg(not(all(feature = "dwarf", target_arch = "wasm32")))]
+        let _ = (ctx, widget);
     }
 }
 
@@ -370,6 +483,9 @@ impl WidgetInspect {
             ref config,
             ref mut open_frame_index,
             ref mut painted_rects,
+            ref mut dwarf,
+            pin_requested: _,
+            consumed_keys: _,
         } = self;
 
         if !enabled {
@@ -424,7 +540,9 @@ impl WidgetInspect {
 
         *selected_widget = (*selected_widget).clamp(0, widgets.len() - 1);
         let selected = widgets.remove(*selected_widget);
-        let resolved = selected.1.resolve();
+        // The module's own debug info if we have it; the `Error.stack` string parse if we
+        // don't — on native, without the feature, or while the index is still being walked.
+        let resolved = resolve_dwarf(dwarf, &selected.1).unwrap_or_else(|| selected.1.resolve());
 
         let filter_frame = |frame: &ParsedFrame| match frame {
             ParsedFrame::Parsed(location) => {
@@ -510,6 +628,15 @@ impl WidgetInspect {
             }
         }
 
+        // ⌘-click: probe this widget from here on. egui then calls `on_probed_widget` from
+        // inside its call stack every frame — pointer or no pointer — which is the only place
+        // its callers' locals are still live. Turning the picker off hands input back, so the
+        // window that appears is one you can actually reach and edit.
+        if std::mem::take(&mut self.pin_requested) {
+            self.dwarf.pin(ctx, selected.0);
+            self.enabled = false;
+        }
+
         let painter = ctx.debug_painter();
 
         // Darken everything except the selected widget
@@ -568,9 +695,11 @@ impl WidgetInspect {
                 i.modifiers.shift,
             )
         });
+        let dwarf_status = self.dwarf.status();
         *painted_rects = paint_info(
             &painter,
             &config,
+            dwarf_status.as_deref(),
             *selected_widget,
             count,
             pointer_pos,
@@ -588,6 +717,9 @@ impl WidgetInspect {
 fn paint_info(
     painter: &Painter,
     config: &Config,
+    // What the DWARF path has to say for itself, if anything — "still indexing", "no module
+    // bytes". `None` once it's ready and working, when there's nothing worth the pixels.
+    dwarf_status: Option<&str>,
     index: usize,
     count: usize,
     pointer_pos: Pos2,
@@ -751,6 +883,14 @@ fn paint_info(
             },
         );
         header_job.append("  Space to toggle", 0.0, weak_small.clone());
+        header_job.append("\nOpen   ", 0.0, weak_small.clone());
+        header_job.append("CLICK", 0.0, strong_small.clone());
+        header_job.append(" source   ", 0.0, weak_small.clone());
+        header_job.append("⌘CLICK", 0.0, strong_small.clone());
+        header_job.append(" live locals", 0.0, weak_small.clone());
+        if let Some(status) = dwarf_status {
+            header_job.append(&format!("\n{status}"), 0.0, weak_small.clone());
+        }
     }
 
     // Maps a frame to a string/format to be shown on the left side. When `shift_pressed` is true
@@ -1193,6 +1333,16 @@ unsafe impl Send for Callstack {}
 impl Callstack {
     fn capture() -> Self {
         Callstack(js_sys::Error::new(""))
+    }
+
+    /// The underlying JS `Error`, for the DWARF path to read `CallSite.getPosition()` off.
+    ///
+    /// Only valid while `.stack` has never been read *as a string*: the first read is what
+    /// runs `prepareStackTrace`, and V8 memoizes whatever it returned. So a capture is
+    /// resolved one way or the other, never both.
+    #[cfg(feature = "dwarf")]
+    fn js_error(&self) -> wasm_bindgen::JsValue {
+        self.0.clone().into()
     }
 
     /// Get the raw stack trace as a string (i.e. without parsing). Note that reading `Error.stack`

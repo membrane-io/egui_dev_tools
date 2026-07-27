@@ -2,6 +2,12 @@ mod symbol_parser;
 pub mod vals;
 mod widget_inspect;
 
+// Resolve the picker's callstacks against the running module's own DWARF, and read each
+// frame's locals live out of the shadow stack. wasm-only: a native backtrace's addresses
+// aren't module offsets into any DWARF we hold, and native has no shadow stack to walk.
+#[cfg(all(feature = "dwarf", target_arch = "wasm32"))]
+pub mod dwarf;
+
 #[cfg(feature = "logging")]
 pub mod logging;
 

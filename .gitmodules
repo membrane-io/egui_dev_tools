@@ -1,0 +1,3 @@
+[submodule "dwarf-explorer"]
+	path = dwarf-explorer
+	url = git@github.com:juancampa/dwarf-explorer.git
