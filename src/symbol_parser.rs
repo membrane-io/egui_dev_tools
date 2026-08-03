@@ -718,8 +718,8 @@ mod tests {
     #[test]
     fn test_symbol_trait_impl() {
         let sym = Symbol::parse(
-      "<<gaze::app::AppState>::render::{closure#0} as core::ops::function::FnOnce<(&mut egui::ui::Ui,)>>::call_once",
-    );
+            "<<gaze::app::AppState>::render::{closure#0} as core::ops::function::FnOnce<(&mut egui::ui::Ui,)>>::call_once",
+        );
         assert_eq!(sym.function(), "call_once");
         assert_eq!(sym.type_(), "AppState");
         assert_eq!(sym.crate_(), "gaze");
@@ -752,14 +752,16 @@ mod tests {
     #[test]
     fn test_symbol_complex_hrtb() {
         let sym = Symbol::parse(
-      "<alloc::boxed::Box<dyn for<'a> core::ops::function::FnOnce<(&'a mut egui::ui::Ui,), Output = ()>>>",
-    );
+            "<alloc::boxed::Box<dyn for<'a> core::ops::function::FnOnce<(&'a mut egui::ui::Ui,), Output = ()>>>",
+        );
         assert_eq!(sym.crate_(), "alloc");
     }
 
     #[test]
     fn test_generic_return_type() {
-        let sym = Symbol::parse("<egui::containers::frame::Frame>::show::<(), <jsx::jsx::EguiElement>::render<<jsx::jsx_view::NodeContext>::render::{closure#0}>::{closure#2}::{closure#0}>");
+        let sym = Symbol::parse(
+            "<egui::containers::frame::Frame>::show::<(), <jsx::jsx::EguiElement>::render<<jsx::jsx_view::NodeContext>::render::{closure#0}>::{closure#2}::{closure#0}>",
+        );
         assert_eq!(sym.crate_(), "egui");
         assert_eq!(sym.function(), "show");
         assert_eq!(sym.type_(), "Frame");
@@ -767,7 +769,9 @@ mod tests {
 
     #[test]
     fn moar() {
-        let sym = Symbol::parse("<alloc::boxed::Box<dyn for<'a> core::ops::function::FnOnce<(&'a mut egui::ui::Ui,), Output = ()>> as core::ops::function::FnOnce<(&mut egui::ui::Ui,)>>::call_once");
+        let sym = Symbol::parse(
+            "<alloc::boxed::Box<dyn for<'a> core::ops::function::FnOnce<(&'a mut egui::ui::Ui,), Output = ()>> as core::ops::function::FnOnce<(&mut egui::ui::Ui,)>>::call_once",
+        );
         assert_eq!(sym.crate_(), "alloc");
         assert_eq!(sym.function(), "call_once");
         assert_eq!(sym.type_(), "Box");
@@ -775,7 +779,9 @@ mod tests {
 
     #[test]
     fn test_shim() {
-        let sym = Symbol::parse("<<gaze::app::AppState>::render::{closure#0} as core::ops::function::FnOnce<(&mut egui::ui::Ui,)>>::call_once::{shim:vtable#0}");
+        let sym = Symbol::parse(
+            "<<gaze::app::AppState>::render::{closure#0} as core::ops::function::FnOnce<(&mut egui::ui::Ui,)>>::call_once::{shim:vtable#0}",
+        );
         assert_eq!(sym.function(), "call_once::{shim:vtable#0}");
         assert_eq!(sym.type_(), "AppState");
         assert_eq!(sym.crate_(), "gaze");
@@ -821,7 +827,9 @@ mod tests {
     }
 
     fn test_symbol_with_hash_and_generics() {
-        let sym = Symbol::parse("eframe[7cb594708737837b]::native::run::with_event_loop::<core[4fd6bfa457654cdd]::result::Result<(), eframe[7cb594708737837b]::Error>, eframe[7cb594708737837b]::native::run::run_wgpu::{closure#0}>::{closure#0}");
+        let sym = Symbol::parse(
+            "eframe[7cb594708737837b]::native::run::with_event_loop::<core[4fd6bfa457654cdd]::result::Result<(), eframe[7cb594708737837b]::Error>, eframe[7cb594708737837b]::native::run::run_wgpu::{closure#0}>::{closure#0}",
+        );
         assert_eq!(sym.function(), "with_event_loop::{closure#0}");
         assert_eq!(sym.type_(), "native");
         assert_eq!(sym.crate_(), "eframe");

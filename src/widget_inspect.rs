@@ -274,7 +274,10 @@ impl Plugin for WidgetInspect {
                 pressed: false,
                 ..
             } = e
-                && let Some(index) = self.consumed_keys.iter().position(|consumed| consumed == key)
+                && let Some(index) = self
+                    .consumed_keys
+                    .iter()
+                    .position(|consumed| consumed == key)
             {
                 self.consumed_keys.swap_remove(index);
                 return false;
@@ -420,9 +423,7 @@ impl Plugin for WidgetInspect {
                 };
                 if !keep
                     && let Event::Key {
-                        key,
-                        pressed: true,
-                        ..
+                        key, pressed: true, ..
                     } = e
                 {
                     self.consume_key(*key);

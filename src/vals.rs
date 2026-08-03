@@ -1,6 +1,6 @@
 use egui::{
-    Button, Context, DragValue, Label, Margin, Painter, Rangef, Response, RichText, Sense,
-    Shadow, Stroke, TextEdit, TextStyle, Ui, Widget,
+    Button, Context, DragValue, Label, Margin, Painter, Rangef, Response, RichText, Sense, Shadow,
+    Stroke, TextEdit, TextStyle, Ui, Widget,
     collapsing_header::paint_default_icon,
     emath::{Pos2, Rect, TSTransform, Vec2},
     epaint::{Color32, Shape},
