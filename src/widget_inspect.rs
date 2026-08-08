@@ -7,7 +7,7 @@ use egui::epaint::{
 };
 use egui::{
     Align, Context, CursorIcon, Event, Id, Key, LayerId, MouseWheelUnit, Painter, Plugin, RawInput,
-    Shape, Spacing, Ui, WidgetRect,
+    Sense, Shape, Spacing, Ui, WidgetRect,
 };
 
 pub struct Config {
@@ -656,7 +656,7 @@ impl WidgetInspect {
         }
 
         // Paint border of selected widget
-        let (id, _, rect, layer_id, _, interact_rect, spacing) = selected;
+        let (id, _, rect, layer_id, sense, interact_rect, spacing) = selected;
         let stroke = (1.0, Color32::MAGENTA.gamma_multiply(0.7));
         painter.rect_stroke(interact_rect, 0.0, stroke, StrokeKind::Outside);
         if rect != interact_rect {
@@ -707,6 +707,7 @@ impl WidgetInspect {
             id,
             layer_id,
             rect,
+            sense,
             &spacing,
             resolved,
             most_significant_frame,
@@ -727,6 +728,7 @@ fn paint_info(
     id: Id, // TODO: show Id
     layer_id: LayerId,
     rect: Rect,
+    sense: Option<Sense>,
     spacing: &Spacing,
     callstack: Vec<ParsedFrame>,
     most_significant_frame: usize,
@@ -1088,18 +1090,61 @@ fn paint_info(
         text_color,
     );
 
-    let spacing_rect = paint_spacing_box(painter, spacing, rect);
+    let spacing_rect = paint_spacing_box(painter, spacing, sense, rect);
 
     vec![header_rect, body_rect, spacing_rect]
+}
+
+/// Format a coordinate so off-grid values are obvious without wasting digits on round ones.
+///
+/// Uses the shortest representation that round-trips (`12.0` → `12`, `0.00001` → `0.00001`), so a
+/// value that is merely *close* to an integer never renders as one. Long tails are cut to two
+/// decimals with a `…`, or to scientific notation when cutting them would print a misleading zero.
+fn format_coord(value: f32) -> String {
+    let exact = format!("{value}");
+    if exact.len() <= 8 {
+        exact
+    } else if value != 0.0 && format!("{value:.2}").parse() == Ok(0.0f32) {
+        format!("{value:.1e}")
+    } else {
+        format!("{value:.2}…")
+    }
+}
+
+fn format_sense(sense: Option<Sense>) -> String {
+    let Some(sense) = sense else {
+        return "-".to_string();
+    };
+    let flags = [
+        ("click", sense.senses_click()),
+        ("drag", sense.senses_drag()),
+        ("focusable", sense.is_focusable()),
+    ];
+    let names = flags
+        .iter()
+        .filter(|(_, set)| *set)
+        .map(|(name, _)| *name)
+        .collect::<Vec<_>>();
+    if names.is_empty() {
+        "hover".to_string()
+    } else {
+        names.join(" | ")
+    }
 }
 
 /// Paint the `Ui` spacing of the selected widget in a box adjacent to it.
 ///
 /// Tries each side of the widget in order (top, right, bottom, left) and uses the first one with
 /// enough room within the viewport. The box is always clamped to stay inside the viewport.
-fn paint_spacing_box(painter: &Painter, spacing: &Spacing, widget_rect: Rect) -> Rect {
+fn paint_spacing_box(
+    painter: &Painter,
+    spacing: &Spacing,
+    sense: Option<Sense>,
+    widget_rect: Rect,
+) -> Rect {
     const MARGIN: f32 = 8.0;
     const GAP: f32 = 4.0;
+    const MIN_WIDTH: f32 = 250.0;
 
     let font = FontId::monospace(10.0);
     let strong = TextFormat {
@@ -1116,14 +1161,23 @@ fn paint_spacing_box(painter: &Painter, spacing: &Spacing, widget_rect: Rect) ->
     };
 
     let rows = [
+        ("rect min:", widget_rect.min.to_vec2()),
+        ("rect max:", widget_rect.max.to_vec2()),
+        ("rect size:", widget_rect.size()),
         ("interact size:", spacing.interact_size),
         ("item spacing:", spacing.item_spacing),
     ];
 
     // Pad labels and values so the values align horizontally (the font is monospace)
-    let label_width = rows.iter().map(|(label, _)| label.len()).max().unwrap_or(0);
-    let x_values = rows.map(|(_, value)| format!("{:.1}", value.x));
-    let y_values = rows.map(|(_, value)| format!("{:.1}", value.y));
+    let sense_label = "sense:";
+    let label_width = rows
+        .iter()
+        .map(|(label, _)| label.len())
+        .chain(std::iter::once(sense_label.len()))
+        .max()
+        .unwrap_or(0);
+    let x_values = rows.map(|(_, value)| format_coord(value.x));
+    let y_values = rows.map(|(_, value)| format_coord(value.y));
     let x_width = x_values.iter().map(|value| value.len()).max().unwrap_or(0);
     let y_width = y_values.iter().map(|value| value.len()).max().unwrap_or(0);
 
@@ -1135,13 +1189,14 @@ fn paint_spacing_box(painter: &Painter, spacing: &Spacing, widget_rect: Rect) ->
             0.0,
             strong.clone(),
         );
-        if i + 1 < rows.len() {
-            job.append("\n", 0.0, strong.clone());
-        }
+        job.append("\n", 0.0, strong.clone());
     }
+    job.append(&format!("{sense_label:<label_width$} "), 0.0, weak.clone());
+    job.append(&format_sense(sense), 0.0, strong.clone());
 
     let galley = painter.layout_job(job);
-    let size = galley.size() + 2.0 * Vec2::splat(MARGIN);
+    let mut size = galley.size() + 2.0 * Vec2::splat(MARGIN);
+    size.x = size.x.max(MIN_WIDTH);
 
     let viewport = painter.ctx().viewport_rect();
     let center = widget_rect.center();
