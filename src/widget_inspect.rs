@@ -11,6 +11,9 @@ use egui::{
 };
 
 pub struct Config {
+    /// Whether to show stack frames from the app's widget crates.
+    show_widget_frames: bool,
+
     /// Whether to show the egui stack frames.
     show_egui_frames: bool,
 
@@ -22,22 +25,35 @@ pub struct Config {
 
     /// When true, only widgets that sense clicks are considered.
     clickable_only: bool,
+
+    /// Answers whether a crate is one of the app's widget crates. The app registers this so the
+    /// picker can group those frames under `WIDGETS`. `None` means no crate is a widget crate.
+    widget_crates: Option<fn(&str) -> bool>,
 }
 
 impl Config {
     pub fn new() -> Self {
         Self {
+            show_widget_frames: true,
             show_egui_frames: false,
             show_std_frames: false,
             show_all_frames: false,
             clickable_only: false,
+            widget_crates: None,
         }
+    }
+
+    /// Register the predicate that answers whether a crate is one of the app's widget crates.
+    pub fn with_widget_crates(mut self, is_widget_crate: fn(&str) -> bool) -> Self {
+        self.widget_crates = Some(is_widget_crate);
+        self
     }
 }
 
 impl std::fmt::Debug for Config {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Config")
+            .field("show_widget_frames", &self.show_widget_frames)
             .field("show_egui_frames", &self.show_egui_frames)
             .field("show_std_frames", &self.show_std_frames)
             .field("show_all_frames", &self.show_all_frames)
@@ -48,12 +64,7 @@ impl std::fmt::Debug for Config {
 
 impl Default for Config {
     fn default() -> Self {
-        Self {
-            show_egui_frames: false,
-            show_std_frames: false,
-            show_all_frames: false,
-            clickable_only: false,
-        }
+        Self::new()
     }
 }
 
@@ -76,8 +87,14 @@ impl ResolvedFrame {
 }
 
 impl ResolvedFrame {
-    fn is_user_code(&self) -> bool {
-        !self.is_std_code() && !self.is_egui_code()
+    fn is_user_code(&self, config: &Config) -> bool {
+        !self.is_std_code() && !self.is_egui_code() && !self.is_widget_code(config)
+    }
+
+    fn is_widget_code(&self, config: &Config) -> bool {
+        config
+            .widget_crates
+            .is_some_and(|is_widget| is_widget(self.symbol.crate_()))
     }
 
     fn is_egui_code(&self) -> bool {
@@ -114,9 +131,9 @@ pub(crate) enum ParsedFrame {
 }
 
 impl ParsedFrame {
-    fn is_user_code(&self) -> bool {
+    fn is_user_code(&self, config: &Config) -> bool {
         match self {
-            ParsedFrame::Parsed(location) => location.is_user_code(),
+            ParsedFrame::Parsed(location) => location.is_user_code(config),
             _ => false,
         }
     }
@@ -341,15 +358,18 @@ impl Plugin for WidgetInspect {
                         pressed: true,
                         ..
                     } => {
-                        // Three verbosity levels for now: app, egui, and std/alloc
+                        // Four verbosity levels: app, widgets, egui, and std/alloc
                         let config = &mut self.config;
-                        if !config.show_egui_frames {
+                        if !config.show_widget_frames {
+                            config.show_widget_frames = true;
+                        } else if !config.show_egui_frames {
                             config.show_egui_frames = true;
                         } else if !config.show_std_frames {
                             config.show_std_frames = true;
                         } else if !config.show_all_frames {
                             config.show_all_frames = true;
                         } else {
+                            config.show_widget_frames = false;
                             config.show_egui_frames = false;
                             config.show_std_frames = false;
                             config.show_all_frames = false;
@@ -551,7 +571,8 @@ impl WidgetInspect {
                 !location.symbol.function().contains("vtable.shim") &&
                     config.show_all_frames || // Show all
                     (!location.is_std_code() || config.show_std_frames) &&
-                    (!location.is_egui_code() || config.show_egui_frames)
+                    (!location.is_egui_code() || config.show_egui_frames) &&
+                    (!location.is_widget_code(config) || config.show_widget_frames)
             }
             _ => config.show_all_frames,
         };
@@ -581,7 +602,7 @@ impl WidgetInspect {
             .position(|frame| {
                 filter_frame(frame)
                     && match frame {
-                        ParsedFrame::Parsed(location) => location.is_user_code(),
+                        ParsedFrame::Parsed(location) => location.is_user_code(config),
                         _ => false,
                     }
             })
@@ -611,7 +632,7 @@ impl WidgetInspect {
         let most_significant_frame = resolved
             .iter()
             .position(|frame| match frame {
-                ParsedFrame::Parsed(location) => location.is_user_code(),
+                ParsedFrame::Parsed(location) => location.is_user_code(config),
                 _ => false,
             })
             .unwrap_or_default();
@@ -841,6 +862,18 @@ fn paint_info(
         );
         header_job.append(" ", 0.0, weak_small.clone());
         header_job.append(
+            "WIDGETS",
+            0.0,
+            TextFormat {
+                underline: config
+                    .show_widget_frames
+                    .then(|| stroke)
+                    .unwrap_or_default(),
+                ..strong_small.clone()
+            },
+        );
+        header_job.append(" ", 0.0, weak_small.clone());
+        header_job.append(
             "EGUI",
             0.0,
             TextFormat {
@@ -900,7 +933,7 @@ fn paint_info(
     // (wasm32 only), we show the original, unparsed stack trace line instead of the resolved symbol.
     let left_side = |frame: &ParsedFrame| match frame {
         ParsedFrame::Parsed(location) => {
-            let format = if location.is_user_code() {
+            let format = if location.is_user_code(config) {
                 strong.clone()
             } else {
                 weak.clone()
@@ -940,7 +973,7 @@ fn paint_info(
     // Maps a frame to a string/format to be shown on the right side
     let right_side = |frame: &ParsedFrame| match frame {
         ParsedFrame::Parsed(resolved) => {
-            let format = if resolved.is_user_code() {
+            let format = if resolved.is_user_code(config) {
                 strong_small.clone()
             } else {
                 weak_small.clone()
@@ -987,7 +1020,7 @@ fn paint_info(
         left_job.append(&label, 0.0, number_format.clone());
         if i == most_significant_frame {
             left_job.append(SELECTED_MARKER, space_width, selected_marker_format.clone());
-        } else if callstack[i].is_user_code() {
+        } else if callstack[i].is_user_code(config) {
             left_job.append(
                 UNSELECTED_MARKER,
                 space_width,
