@@ -92,6 +92,11 @@ impl Dwarf {
     pub fn status(&self) -> Option<String> {
         match self.index_stats() {
             None => Some("no DWARF — is wasm-stack-trace.js loaded before the module?".to_owned()),
+            // A module that wasm-bindgen wrote without `--keep-debug`. The page fetches the
+            // sidecar after the module starts, and `warm_index` loads it when it arrives.
+            Some(s) if s.units_total == 0 => {
+                Some("the module carries no DWARF — waiting for the sidecar".to_owned())
+            }
             Some(s) if s.is_complete() => None,
             Some(s) => Some(format!(
                 "indexing DWARF… {}/{} units",
@@ -123,6 +128,14 @@ impl Dwarf {
     /// would stutter on some targets and crawl on others. Instead it adapts to the frame time
     /// we're actually getting: back off when frames go long, open up when they're comfortable.
     pub fn warm_index(&mut self, ctx: &Context) {
+        // The page fetches the sidecar after the module starts, so the load at start can
+        // see a module without DWARF. Load again when the sidecar arrives.
+        if self.dev.as_ref().is_some_and(|d| !d.db().has_sidecar())
+            && dwarf_explorer_egui::own_sidecar_attached()
+            && let Err(e) = self.load()
+        {
+            log::warn!("widget picker: the DWARF sidecar did not load ({e})");
+        }
         let Some(dev) = self.dev.as_mut() else {
             return;
         };
