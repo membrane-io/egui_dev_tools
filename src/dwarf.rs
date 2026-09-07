@@ -57,6 +57,14 @@ impl Default for Dwarf {
     }
 }
 
+/// Attach the DWARF sidecar of the running module: the linker output that
+/// `build_wasm.sh --split-dwarf` writes next to the shipped wasm. The page fetches it
+/// after the module starts and hands the bytes here. Stack traces and [`Dwarf::load`]
+/// then read the sidecar. `false` if the page did not install `wasm-stack-trace`.
+pub fn attach_sidecar(bytes: &[u8]) -> bool {
+    dwarf_explorer_egui::attach_own_sidecar(bytes)
+}
+
 impl Dwarf {
     /// Read the running module's own `.wasm` — debug sections and all — out of the page.
     ///
