@@ -282,7 +282,7 @@ impl Plugin for WidgetInspect {
         crate::hot_call(|| self.render(ui));
     }
 
-    fn input_hook(&mut self, input: &mut RawInput) {
+    fn input_hook(&mut self, _ctx: &Context, input: &mut RawInput) {
         input.events.retain(|e| {
             // Swallow the release of every press we swallowed, even after we got disabled in
             // between, so the app never sees a release without a matching press.
