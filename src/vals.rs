@@ -454,7 +454,7 @@ impl Default for Options {
 
 impl Options {
     fn id() -> Id {
-        Id::new("gaze/debug_vals/options")
+        Id::unique("gaze/debug_vals/options")
     }
 
     fn load(ctx: &Context) -> Self {
@@ -756,7 +756,7 @@ impl DebugValsPlugin {
             }
             let indicator_pos = placer.place(group.rect, hover_size);
             let color = placed_dot_color(&group.prefix);
-            let area_id = Id::new("placed-val-group").with(widget_id);
+            let area_id = Id::unique("placed-val-group").with(widget_id);
             let is_expanded = self.expanded_placed_groups.contains(widget_id);
 
             egui::Area::new(area_id)
@@ -911,7 +911,7 @@ pub struct ValHandle<T: Clone + DebugVal> {
 impl<T: Clone + Default + DebugVal + 'static> ValHandle<T> {
     pub fn new(id: Id, metadata: DebugValMetadata, params: ValParams) -> Self {
         let metadata = Self::apply_prefix(metadata);
-        let id = Id::new(
+        let id = Id::unique(
             metadata
                 .custom_key
                 .as_deref()
@@ -955,7 +955,7 @@ impl<T: Clone + DebugVal + 'static> ValHandle<T> {
         default: impl Into<T>,
     ) -> Self {
         let metadata = Self::apply_prefix(metadata);
-        let id = Id::new(
+        let id = Id::unique(
             metadata
                 .custom_key
                 .as_deref()
@@ -1037,7 +1037,7 @@ macro_rules! show_debug {
 macro_rules! val {
   ($ty:ty) => {{
     let file_line_col = concat!(file!(), ":", line!(), ":", column!());
-    let key = $crate::vals::Id::new(file_line_col);
+    let key = $crate::vals::Id::unique(file_line_col);
     let metadata = $crate::vals::DebugValMetadata {
       file_line_col,
       module_path: module_path!(),
@@ -1049,7 +1049,7 @@ macro_rules! val {
   ($ty:ty, $key:expr, default = $default:expr $(, $param:ident = $value:expr)* $(,)?) => {{
     let file_line_col = concat!(file!(), ":", line!(), ":", column!());
     let custom_key = format!("{:?}", $key);
-    let id = $crate::vals::Id::new(custom_key.as_str());
+    let id = $crate::vals::Id::unique(custom_key.as_str());
     let metadata = $crate::vals::DebugValMetadata {
       file_line_col,
       module_path: module_path!(),
@@ -1062,7 +1062,7 @@ macro_rules! val {
   ($ty:ty, $key:expr, $($param:ident = $value:expr),+ $(,)?) => {{
     let file_line_col = concat!(file!(), ":", line!(), ":", column!());
     let custom_key = format!("{:?}", $key);
-    let id = $crate::vals::Id::new(custom_key.as_str());
+    let id = $crate::vals::Id::unique(custom_key.as_str());
     let metadata = $crate::vals::DebugValMetadata {
       file_line_col,
       module_path: module_path!(),
@@ -1075,7 +1075,7 @@ macro_rules! val {
   ($ty:ty, $key:expr) => {{
     let file_line_col = concat!(file!(), ":", line!(), ":", column!());
     let custom_key = format!("{:?}", $key);
-    let id = $crate::vals::Id::new(custom_key.as_str());
+    let id = $crate::vals::Id::unique(custom_key.as_str());
     let metadata = $crate::vals::DebugValMetadata {
       file_line_col,
       module_path: module_path!(),
@@ -1094,7 +1094,7 @@ macro_rules! val {
       )+
       key
     };
-    let id = $crate::vals::Id::new(custom_key.as_str());
+    let id = $crate::vals::Id::unique(custom_key.as_str());
     let metadata = $crate::vals::DebugValMetadata {
       file_line_col,
       module_path: module_path!(),
@@ -1120,7 +1120,7 @@ macro_rules! val {
 macro_rules! val_handle {
   ($ty:ty) => {{
     let file_line_col = concat!(file!(), ":", line!(), ":", column!());
-    let key = $crate::vals::Id::new(file_line_col);
+    let key = $crate::vals::Id::unique(file_line_col);
     let metadata = $crate::vals::DebugValMetadata {
       file_line_col,
       module_path: module_path!(),
@@ -1132,7 +1132,7 @@ macro_rules! val_handle {
   ($ty:ty, $key:expr, default = $default:expr $(, $param:ident = $value:expr)* $(,)?) => {{
     let file_line_col = concat!(file!(), ":", line!(), ":", column!());
     let custom_key = format!("{:?}", $key);
-    let id = $crate::vals::Id::new(custom_key.as_str());
+    let id = $crate::vals::Id::unique(custom_key.as_str());
     let metadata = $crate::vals::DebugValMetadata {
       file_line_col,
       module_path: module_path!(),
@@ -1145,7 +1145,7 @@ macro_rules! val_handle {
   ($ty:ty, $key:expr, $($param:ident = $value:expr),+ $(,)?) => {{
     let file_line_col = concat!(file!(), ":", line!(), ":", column!());
     let custom_key = format!("{:?}", $key);
-    let id = $crate::vals::Id::new(custom_key.as_str());
+    let id = $crate::vals::Id::unique(custom_key.as_str());
     let metadata = $crate::vals::DebugValMetadata {
       file_line_col,
       module_path: module_path!(),
@@ -1158,7 +1158,7 @@ macro_rules! val_handle {
   ($ty:ty, $key:expr) => {{
     let file_line_col = concat!(file!(), ":", line!(), ":", column!());
     let custom_key = format!("{:?}", $key);
-    let id = $crate::vals::Id::new(custom_key.as_str());
+    let id = $crate::vals::Id::unique(custom_key.as_str());
     let metadata = $crate::vals::DebugValMetadata {
       file_line_col,
       module_path: module_path!(),
@@ -1177,7 +1177,7 @@ macro_rules! val_handle {
       )+
       key
     };
-    let id = $crate::vals::Id::new(custom_key.as_str());
+    let id = $crate::vals::Id::unique(custom_key.as_str());
     let metadata = $crate::vals::DebugValMetadata {
       file_line_col,
       module_path: module_path!(),
@@ -1197,7 +1197,7 @@ macro_rules! val_handle {
 macro_rules! val_mut {
   ($ty:ty) => {{
     let file_line_col = concat!(file!(), ":", line!(), ":", column!());
-    let id = $crate::vals::Id::new(file_line_col);
+    let id = $crate::vals::Id::unique(file_line_col);
     let metadata = $crate::vals::DebugValMetadata {
       file_line_col,
       module_path: module_path!(),
@@ -1209,7 +1209,7 @@ macro_rules! val_mut {
   ($ty:ty, $key:expr, default = $default:expr $(, $param:ident = $value:expr)* $(,)?) => {{
     let file_line_col = concat!(file!(), ":", line!(), ":", column!());
     let custom_key = format!("{:?}", $key);
-    let id = $crate::vals::Id::new(custom_key.as_str());
+    let id = $crate::vals::Id::unique(custom_key.as_str());
     let metadata = $crate::vals::DebugValMetadata {
       file_line_col,
       module_path: module_path!(),
@@ -1222,7 +1222,7 @@ macro_rules! val_mut {
   ($ty:ty, $key:expr, $($param:ident = $value:expr),+ $(,)?) => {{
     let file_line_col = concat!(file!(), ":", line!(), ":", column!());
     let custom_key = format!("{:?}", $key);
-    let id = $crate::vals::Id::new(custom_key.as_str());
+    let id = $crate::vals::Id::unique(custom_key.as_str());
     let metadata = $crate::vals::DebugValMetadata {
       file_line_col,
       module_path: module_path!(),
@@ -1235,7 +1235,7 @@ macro_rules! val_mut {
   ($ty:ty, $key:expr) => {{
     let file_line_col = concat!(file!(), ":", line!(), ":", column!());
     let custom_key = format!("{:?}", $key);
-    let id = $crate::vals::Id::new(custom_key.as_str());
+    let id = $crate::vals::Id::unique(custom_key.as_str());
     let metadata = $crate::vals::DebugValMetadata {
       file_line_col,
       module_path: module_path!(),
@@ -1254,7 +1254,7 @@ macro_rules! val_mut {
       )+
       key
     };
-    let id = $crate::vals::Id::new(custom_key.as_str());
+    let id = $crate::vals::Id::unique(custom_key.as_str());
     let metadata = $crate::vals::DebugValMetadata {
       file_line_col,
       module_path: module_path!(),
@@ -1691,7 +1691,7 @@ fn flatten_tree(
         } else {
             format!("{path}/{name}")
         };
-        let section_id = Id::new("__vals_section").with(&section_path);
+        let section_id = Id::unique("__vals_section").with(&section_path);
         out.push(FlatRow::Section {
             name: name.to_string(),
             depth,

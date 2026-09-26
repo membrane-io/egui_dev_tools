@@ -128,7 +128,7 @@ impl SourceLocation {
 }
 
 fn file_opener_key() -> Id {
-    Id::new("egui_dev_tools::file_opener")
+    Id::unique("egui_dev_tools::file_opener")
 }
 
 /// Sets a function that will be called when egui_dev_tools wants to open a source file.

@@ -241,7 +241,7 @@ impl Dwarf {
         // show you, garbage and all.
         let title = format!("live locals — {:?}", widget.id.short_debug_format());
         let window = egui::Window::new(title.as_str())
-            .id(Id::new("egui_dev_tools_dwarf_locals"))
+            .id(Id::unique("egui_dev_tools_dwarf_locals"))
             .order(Order::Tooltip)
             .collapsible(false)
             .resizable(true)
@@ -263,7 +263,7 @@ impl Dwarf {
                 }
                 // Keys every frame's open/closed state (as root + stack position), so it
                 // must survive re-pinning: one constant per window, nothing captured.
-                let frames_root = Id::new("egui_dev_tools_dwarf_locals");
+                let frames_root = Id::unique("egui_dev_tools_dwarf_locals");
                 ui.horizontal(|ui| {
                     ui.weak(
                         "live — green locals are editable; edits write the running frame's memory",

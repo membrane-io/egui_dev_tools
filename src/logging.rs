@@ -260,7 +260,7 @@ impl LogNotificationPlugin {
         let ctx = ui.ctx().clone();
         let mut clicked = false;
 
-        egui::Area::new(egui::Id::new("egui_dev_tools::log_notification"))
+        egui::Area::new(egui::Id::unique("egui_dev_tools::log_notification"))
             .order(egui::Order::Foreground)
             .anchor(self.anchor, self.offset)
             .show(&ctx, |ui| {
