@@ -23,8 +23,8 @@ pub struct Config {
     /// Whether to show all other stack frames including JavaScript and unparsed frames.
     show_all_frames: bool,
 
-    /// When true, only widgets that sense clicks are considered.
-    clickable_only: bool,
+    /// Selects the widgets the picker considers by their `Sense`.
+    sense_filter: SenseFilter,
 
     /// Answers whether a crate is one of the app's widget crates. The app registers this so the
     /// picker can group those frames under `WIDGETS`. `None` means no crate is a widget crate.
@@ -38,7 +38,7 @@ impl Config {
             show_egui_frames: false,
             show_std_frames: false,
             show_all_frames: false,
-            clickable_only: false,
+            sense_filter: SenseFilter::Any,
             widget_crates: None,
         }
     }
@@ -57,8 +57,37 @@ impl std::fmt::Debug for Config {
             .field("show_egui_frames", &self.show_egui_frames)
             .field("show_std_frames", &self.show_std_frames)
             .field("show_all_frames", &self.show_all_frames)
-            .field("clickable_only", &self.clickable_only)
+            .field("sense_filter", &self.sense_filter)
             .finish()
+    }
+}
+
+/// Selects the widgets the picker considers by their `Sense`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SenseFilter {
+    /// Only widgets that sense clicks.
+    Clickable,
+    /// Only widgets that sense drags.
+    Draggable,
+    /// All widgets.
+    Any,
+}
+
+impl SenseFilter {
+    fn next(self) -> Self {
+        match self {
+            Self::Clickable => Self::Draggable,
+            Self::Draggable => Self::Any,
+            Self::Any => Self::Clickable,
+        }
+    }
+
+    fn accepts(self, sense: egui::Sense) -> bool {
+        match self {
+            Self::Clickable => sense.senses_click(),
+            Self::Draggable => sense.senses_drag(),
+            Self::Any => true,
+        }
     }
 }
 
@@ -381,7 +410,7 @@ impl Plugin for WidgetInspect {
                         pressed: true,
                         ..
                     } => {
-                        self.config.clickable_only = !self.config.clickable_only;
+                        self.config.sense_filter = self.config.sense_filter.next();
                         false
                     }
                     Event::Key {
@@ -457,7 +486,7 @@ impl Plugin for WidgetInspect {
 
     #[cfg(debug_assertions)]
     fn on_widget_under_pointer(&mut self, _ctx: &Context, widget: &WidgetRect, spacing: &Spacing) {
-        if self.config.clickable_only && !widget.sense.senses_click() {
+        if !self.config.sense_filter.accepts(widget.sense) {
             return;
         }
         // Some widgets call `Context::create_widget` twice, once during creation and once after all of its
@@ -905,7 +934,20 @@ fn paint_info(
             "CLICK",
             0.0,
             TextFormat {
-                underline: config.clickable_only.then(|| stroke).unwrap_or_default(),
+                underline: (config.sense_filter == SenseFilter::Clickable)
+                    .then(|| stroke)
+                    .unwrap_or_default(),
+                ..strong_small.clone()
+            },
+        );
+        header_job.append(" ", 0.0, weak_small.clone());
+        header_job.append(
+            "DRAG",
+            0.0,
+            TextFormat {
+                underline: (config.sense_filter == SenseFilter::Draggable)
+                    .then(|| stroke)
+                    .unwrap_or_default(),
                 ..strong_small.clone()
             },
         );
@@ -914,11 +956,13 @@ fn paint_info(
             "ANY",
             0.0,
             TextFormat {
-                underline: (!config.clickable_only).then(|| stroke).unwrap_or_default(),
+                underline: (config.sense_filter == SenseFilter::Any)
+                    .then(|| stroke)
+                    .unwrap_or_default(),
                 ..strong_small.clone()
             },
         );
-        header_job.append("  Space to toggle", 0.0, weak_small.clone());
+        header_job.append("  Space to cycle", 0.0, weak_small.clone());
         header_job.append("\nOpen   ", 0.0, weak_small.clone());
         header_job.append("CLICK", 0.0, strong_small.clone());
         header_job.append(" source   ", 0.0, weak_small.clone());
