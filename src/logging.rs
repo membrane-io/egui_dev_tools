@@ -290,8 +290,20 @@ impl LogNotificationPlugin {
 
                 if response.hovered() {
                     let last_ack = self.last_acknowledged;
-                    let available_height = (ui.content_rect().height() - 80.0).max(0.0);
-                    egui::Tooltip::for_widget(&response).show(|ui| {
+                    // The tooltip must fit above the notification. If it does not fit, egui moves
+                    // it over the notification, the notification loses the hover, and the tooltip
+                    // closes and opens again on each frame. The subtracted value holds the gap, the
+                    // tooltip frame, the last row, and the "…and N more" row.
+                    const TOOLTIP_GAP: f32 = 4.0;
+                    let available_height =
+                        (response.rect.top() - ui.content_rect().top() - TOOLTIP_GAP - 64.0).max(0.0);
+                    let mut tooltip = egui::Tooltip::for_widget(&response);
+                    tooltip.popup = tooltip
+                        .popup
+                        .gap(TOOLTIP_GAP)
+                        .align(egui::RectAlign::TOP_END)
+                        .align_alternatives(&[]);
+                    tooltip.show(|ui| {
                         ui.set_max_width(600.0_f32.min(ui.content_rect().width()));
                         let mut painted_count = 0;
                         const MAX_PAINTED_COUNT: usize = 100;
