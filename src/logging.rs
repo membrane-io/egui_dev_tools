@@ -296,7 +296,8 @@ impl LogNotificationPlugin {
                     // tooltip frame, the last row, and the "…and N more" row.
                     const TOOLTIP_GAP: f32 = 4.0;
                     let available_height =
-                        (response.rect.top() - ui.content_rect().top() - TOOLTIP_GAP - 64.0).max(0.0);
+                        (response.rect.top() - ui.content_rect().top() - TOOLTIP_GAP - 64.0)
+                            .max(0.0);
                     let mut tooltip = egui::Tooltip::for_widget(&response);
                     tooltip.popup = tooltip
                         .popup
