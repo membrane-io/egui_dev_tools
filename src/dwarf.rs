@@ -128,6 +128,8 @@ impl Dwarf {
     /// would stutter on some targets and crawl on others. Instead it adapts to the frame time
     /// we're actually getting: back off when frames go long, open up when they're comfortable.
     pub fn warm_index(&mut self, ctx: &Context) {
+        // TODO: Do we need this for stack variables? This return makes dev builds faster.
+        return;
         // The page fetches the sidecar after the module starts, so the load at start can
         // see a module without DWARF. Load again when the sidecar arrives.
         if self.dev.as_ref().is_some_and(|d| !d.db().has_sidecar())
