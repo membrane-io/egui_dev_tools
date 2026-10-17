@@ -24,6 +24,7 @@ dwarf = ["dep:dwarf-explorer-egui", "dep:rustc-demangle"]
 egui = { workspace = true }
 egui_tracing = { path = "../egui_tracing", default-features = false, features = ["log", "wasmbind"], optional = true }
 egui_table = { workspace = true }
+icons = { workspace = true }
 profiling = { workspace = true }
 log = { workspace = true }
 regex = "1"
