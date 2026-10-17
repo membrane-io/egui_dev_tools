@@ -1,7 +1,6 @@
 use egui::{
     Button, Context, DragValue, Label, Margin, Painter, Rangef, Response, RichText, Sense, Shadow,
     Stroke, TextEdit, TextStyle, Ui, Widget,
-    collapsing_header::paint_default_icon,
     emath::{Pos2, Rect, TSTransform, Vec2},
     epaint::{Color32, Shape},
     plugin::{Plugin, TypedPluginHandle},
@@ -124,6 +123,10 @@ pub use egui::Id;
 
 pub const KEY_DELIMITER: &str = "/";
 const HIERARCHY_INDENT: f32 = 8.0;
+const CARET_SIZE: f32 = 12.0;
+/// The space between a section caret and the section label.
+const CARET_GAP: f32 = 2.0;
+const ROW_ICON_SIZE: f32 = 13.0;
 
 const PLACED_PALETTE: [Color32; 8] = [
     Color32::from_rgb(80, 200, 255),
@@ -643,6 +646,15 @@ impl DebugValsPlugin {
             // self.order.remove(&label);
             self.values.remove(&id);
         }
+    }
+
+    /// Counts the user-tuned values that differ from their default. An app-controlled value is not
+    /// an override, because the app writes it.
+    pub fn override_count(&self) -> usize {
+        self.values
+            .values()
+            .filter(|entry| !entry.metadata.app_controlled && entry.is_modified())
+            .count()
     }
 
     /// Iterate over all values in alphabetical order by display label.
@@ -1293,6 +1305,11 @@ pub fn clear_val_by_key(prefix: &str) {
     with_plugin(|p| p.clear(prefix));
 }
 
+/// Returns the number of user-tuned vals that differ from their default.
+pub fn override_count() -> usize {
+    with_plugin(|p| p.override_count()).unwrap_or(0)
+}
+
 /// Remove a val and all children vals whose key starts with the given prefix.
 ///
 /// Accepts one or more key segments that are joined with `KEY_DELIMITER`.
@@ -1609,6 +1626,7 @@ impl Widget for DebugValues {
                         plugin: &mut plugin,
                         interact_height,
                         striped: self.striped,
+                        hovered_row: None,
                     };
                     Table::new()
                         .id_salt("__vals_table")
@@ -1819,6 +1837,8 @@ struct ValsTableDelegate<'a> {
     plugin: &'a mut DebugValsPlugin,
     interact_height: f32,
     striped: bool,
+    /// The row under the pointer. `row_ui` sets it before the table calls `cell_ui` for that row.
+    hovered_row: Option<u64>,
 }
 
 impl ValsTableDelegate<'_> {
@@ -1841,6 +1861,9 @@ impl TableDelegate for ValsTableDelegate<'_> {
     fn header_cell_ui(&mut self, _ui: &mut Ui, _cell: &HeaderCellInfo) {}
 
     fn row_ui(&mut self, ui: &mut Ui, row_nr: u64) {
+        if ui.rect_contains_pointer(ui.max_rect()) {
+            self.hovered_row = Some(row_nr);
+        }
         let row = &self.rows[row_nr as usize];
         match row {
             FlatRow::Section { .. } => {
@@ -1874,11 +1897,17 @@ impl TableDelegate for ValsTableDelegate<'_> {
                         .ctx()
                         .data_mut(|data| data.get_persisted::<bool>(*id))
                         .unwrap_or(true);
-                    let openness = ui.ctx().animate_bool(*id, expanded);
-
-                    let icon_size = Vec2::splat(self.interact_height * 0.6);
-                    let (_, icon_response) = ui.allocate_exact_size(icon_size, Sense::click());
-                    paint_default_icon(ui, openness, &icon_response);
+                    let (caret_rect, icon_response) =
+                        ui.allocate_exact_size(Vec2::splat(CARET_SIZE), Sense::click());
+                    let caret = if expanded {
+                        icons::CARET_DOWN
+                    } else {
+                        icons::CARET_RIGHT
+                    };
+                    caret
+                        .stroke(Stroke::new(1.0, ui.visuals().weak_text_color()))
+                        .paint(ui, caret_rect);
+                    ui.add_space(CARET_GAP);
 
                     let label_response =
                         ui.add(Label::new(RichText::new(name).strong()).truncate());
@@ -1903,7 +1932,7 @@ impl TableDelegate for ValsTableDelegate<'_> {
                     };
                     match cell.col_nr {
                         0 => {
-                            let indent = *depth as f32 * HIERARCHY_INDENT;
+                            let indent = *depth as f32 * HIERARCHY_INDENT + CARET_SIZE + CARET_GAP;
                             ui.add_space(indent);
                             let mut text = RichText::new(metadata.display_label());
                             if modified {
@@ -1921,52 +1950,37 @@ impl TableDelegate for ValsTableDelegate<'_> {
                             }
                         }
                         2 => {
+                            let size = self.interact_height;
                             ui.add_space(1.0);
-                            if ui
-                                .add(
-                                    Button::new(RichText::new("{}").monospace().size(10.0))
-                                        .min_size(Vec2::splat(self.interact_height))
-                                        .frame(false)
-                                        .frame_when_inactive(false),
-                                )
-                                .on_hover_text(metadata.file_line_col)
-                                .clicked()
-                            {
-                                let source = SourceLocation {
-                                    path: metadata.file_line_col.to_string(),
-                                    line: 0,
-                                    column: 0,
-                                };
-                                open_file(ui.ctx(), &source);
+                            if self.hovered_row == Some(cell.row_nr) {
+                                if row_icon_button(ui, icons::FILE_CODE, size)
+                                    .on_hover_text(metadata.file_line_col)
+                                    .clicked()
+                                {
+                                    let source = SourceLocation {
+                                        path: metadata.file_line_col.to_string(),
+                                        line: 0,
+                                        column: 0,
+                                    };
+                                    open_file(ui.ctx(), &source);
+                                }
+                                let literal = entry.value.as_rust_literal();
+                                if row_icon_button(ui, icons::COPY, size)
+                                    .on_hover_text(format!("Copy: {literal}"))
+                                    .clicked()
+                                {
+                                    ui.ctx().copy_text(literal);
+                                }
+                            } else {
+                                ui.add_space(size * 2.0);
                             }
-                            let literal = entry.value.as_rust_literal();
-                            if ui
-                                .add(
-                                    Button::new(RichText::new("=").monospace().size(10.0))
-                                        .min_size(Vec2::splat(self.interact_height))
-                                        .frame(false)
-                                        .frame_when_inactive(false),
-                                )
-                                .on_hover_text(format!("Copy: {literal}"))
-                                .clicked()
-                            {
-                                ui.ctx().copy_text(literal);
-                            }
-                            let reset_response = ui.add_enabled(
-                                modified,
-                                Button::new(RichText::new("↺").size(10.0))
-                                    .min_size(Vec2::splat(self.interact_height))
-                                    .frame(false)
-                                    .frame_when_inactive(false),
-                            );
-                            if modified {
-                                reset_response
+                            if modified
+                                && row_icon_button(ui, icons::ARROW_COUNTER_CLOCKWISE, size)
                                     .on_hover_text("Reset to default")
                                     .clicked()
-                                    .then(|| {
-                                        entry.value = entry.default.clone_boxed();
-                                        entry.value.save_persisted(ui.ctx(), *val_id);
-                                    });
+                            {
+                                entry.value = entry.default.clone_boxed();
+                                entry.value.save_persisted(ui.ctx(), *val_id);
                             }
                             ui.add_space(1.0);
                         }
@@ -1976,6 +1990,20 @@ impl TableDelegate for ValsTableDelegate<'_> {
             }
         }
     }
+}
+
+/// A frameless square button that paints `icon` in the weak text color, and in the strong text
+/// color while the pointer is on it.
+fn row_icon_button(ui: &mut Ui, icon: icons::Icon, size: f32) -> Response {
+    let (rect, response) = ui.allocate_exact_size(Vec2::splat(size), Sense::click());
+    let color = if response.hovered() {
+        ui.visuals().strong_text_color()
+    } else {
+        ui.visuals().weak_text_color()
+    };
+    let icon_rect = Rect::from_center_size(rect.center(), Vec2::splat(ROW_ICON_SIZE.min(size)));
+    icon.stroke(Stroke::new(1.0, color)).paint(ui, icon_rect);
+    response
 }
 
 #[macro_export]
