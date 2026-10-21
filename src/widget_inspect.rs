@@ -264,7 +264,7 @@ impl WidgetInspect {
         // this works under `dev_hot.sh` too, where dx's glue loads the module itself. Cheap:
         // `Db::from_bytes` copies the `.debug_*` sections and nothing more — the index is built
         // lazily, a slice per frame, in `on_end_pass`.
-        let mut dwarf = Dwarf::default();
+        let dwarf = Dwarf::default();
         #[cfg(all(feature = "dwarf", target_arch = "wasm32"))]
         if let Err(e) = dwarf.load() {
             log::warn!("widget picker: no DWARF, falling back to Error.stack parsing ({e})");
