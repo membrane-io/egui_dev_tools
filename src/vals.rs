@@ -18,6 +18,12 @@ thread_local! {
   static ACTIVE_VAL_PREFIX: RefCell<String> = const { RefCell::new(String::new()) };
 }
 
+/// True when the `vals` feature is on. When it is false, each val returns its default value and
+/// the code does not read or write the shared store. The macros read this constant, because a
+/// macro cannot test a feature of the crate that defines it.
+#[doc(hidden)]
+pub const ENABLED: bool = cfg!(feature = "vals");
+
 pub fn active_val_placer() -> Option<Id> {
     ACTIVE_VAL_PLACER.with(|c| c.get())
 }
@@ -65,6 +71,12 @@ impl ValGroup {
     }
 
     pub fn with_id(widget_id: Id, name: &str) -> Self {
+        if !ENABLED {
+            return Self {
+                previous_placer: None,
+                previous_prefix: String::new(),
+            };
+        }
         let previous_placer = ACTIVE_VAL_PLACER.with(|c| c.replace(Some(widget_id)));
         let previous_prefix = ACTIVE_VAL_PREFIX.with(|c| {
             let mut current = c.borrow_mut();
@@ -86,6 +98,9 @@ impl ValGroup {
 
 impl Drop for ValGroup {
     fn drop(&mut self) {
+        if !ENABLED {
+            return;
+        }
         ACTIVE_VAL_PLACER.with(|c| c.set(self.previous_placer));
         ACTIVE_VAL_PREFIX.with(|c| *c.borrow_mut() = std::mem::take(&mut self.previous_prefix));
     }
@@ -922,6 +937,14 @@ pub struct ValHandle<T: Clone + DebugVal> {
 
 impl<T: Clone + Default + DebugVal + 'static> ValHandle<T> {
     pub fn new(id: Id, metadata: DebugValMetadata, params: ValParams) -> Self {
+        if !ENABLED {
+            return Self {
+                id,
+                metadata,
+                params,
+                value: T::default(),
+            };
+        }
         let metadata = Self::apply_prefix(metadata);
         let id = Id::unique(
             metadata
@@ -966,6 +989,14 @@ impl<T: Clone + DebugVal + 'static> ValHandle<T> {
         params: ValParams,
         default: impl Into<T>,
     ) -> Self {
+        if !ENABLED {
+            return Self {
+                id,
+                metadata,
+                params,
+                value: default.into(),
+            };
+        }
         let metadata = Self::apply_prefix(metadata);
         let id = Id::unique(
             metadata
@@ -1011,6 +1042,9 @@ impl<T: Clone + DebugVal> std::ops::DerefMut for ValHandle<T> {
 
 impl<T: Clone + DebugVal + 'static> Drop for ValHandle<T> {
     fn drop(&mut self) {
+        if !ENABLED {
+            return;
+        }
         with_plugin(|p| {
             p.set(
                 self.id,
@@ -1045,8 +1079,30 @@ macro_rules! show_debug {
 /// val!(String, "title", default = "mr", options = ["mr", "ms"]) // string with default + dropdown
 /// val!(f32, "physics", "gravity")                              // hierarchical key
 /// ```
+///
+/// When the `vals` feature is off, `val!` returns the default value and does not format the key.
 #[macro_export]
 macro_rules! val {
+  ($ty:ty, $key:expr, default = $default:expr $(, $param:ident = $value:expr)* $(,)?) => {
+    if $crate::vals::ENABLED {
+      $crate::__val_impl!($ty, $key, default = $default $(, $param = $value)*)
+    } else {
+      ::std::convert::Into::<$ty>::into($default)
+    }
+  };
+  ($ty:ty $(, $($rest:tt)*)?) => {
+    if $crate::vals::ENABLED {
+      $crate::__val_impl!($ty $(, $($rest)*)?)
+    } else {
+      <$ty as ::std::default::Default>::default()
+    }
+  };
+}
+
+/// The implementation of [`val!`] when the `vals` feature is on.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __val_impl {
   ($ty:ty) => {{
     let file_line_col = concat!(file!(), ":", line!(), ":", column!());
     let key = $crate::vals::Id::unique(file_line_col);

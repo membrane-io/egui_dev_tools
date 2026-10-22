@@ -14,85 +14,10 @@ pub mod logging;
 use std::sync::Arc;
 
 use egui::Id;
-#[cfg(feature = "vals")]
+// The `vals` module compiles with and without the `vals` feature. Without the feature, each val
+// returns its default value. See `vals::ENABLED`.
 pub use vals::{DebugValsPlugin, DebugValues, ValGroup, ValParams};
 pub type ValsEditor = DebugValues;
-
-/// Dummy macros for vals that returns a default value
-#[cfg(not(feature = "vals"))]
-mod dummies {
-    #[macro_export]
-    macro_rules! val {
-        ($ty:ty) => {
-            $ty::default()
-        };
-        ($ty:ty, $key:expr, default = $default:expr $(, $param:ident = $value:expr)* $(,)?) => {
-            ::std::convert::Into::<$ty>::into($default)
-        };
-        ($ty:ty, $key:expr, $($param:ident = $value:expr),+ $(,)?) => {
-            $ty::default()
-        };
-        ($ty:ty, $key:expr) => {
-            $ty::default()
-        };
-        ($ty:ty, $key1:expr, $($rest:expr),+ $(,)?) => {
-            $ty::default()
-        };
-    }
-
-    #[macro_export]
-    macro_rules! val_handle {
-        ($ty:ty) => {
-            DummyValHandle::<$ty>::default()
-        };
-        ($ty:ty, $key:expr, default = $default:expr $(, $param:ident = $value:expr)* $(,)?) => {
-            DummyValHandle::<$ty>::new($default)
-        };
-        ($ty:ty, $key:expr, $($param:ident = $value:expr),+ $(,)?) => {
-            DummyValHandle::<$ty>::new($ty::default())
-        };
-        ($ty:ty, $key:expr) => {
-            DummyValHandle::<$ty>::new($ty::default())
-        };
-        ($ty:ty, $key1:expr, $($rest:expr),+ $(,)?) => {
-            $ty::default()
-        };
-    }
-
-    pub struct DummyValHandle<T: Copy + Default>(T);
-
-    impl Deref for DummyValHandle<T> {
-        type Target = T;
-        fn deref(&self) -> &Self::Target {
-            &self.value
-        }
-    }
-    impl DerefMut for DummyValHandle<T> {
-        fn deref_mut(&mut self) -> &mut Self::Target {
-            &mut self.value
-        }
-    }
-
-    #[cfg(not(feature = "vals"))]
-    #[macro_export]
-    macro_rules! val_mut {
-        ($ty:ty) => {
-            ValHandle::<$ty>::new($ty::default())
-        };
-        ($ty:ty, $key:expr, default = $default:expr $(, $param:ident = $value:expr)* $(,)?) => {
-            ValHandle::<$ty>::new(::std::convert::Into::<$ty>::into($default))
-        };
-        ($ty:ty, $key:expr, $($param:ident = $value:expr),+ $(,)?) => {
-            ValHandle::<$ty>::new($ty::default())
-        };
-        ($ty:ty, $key:expr) => {
-            ValHandle::<$ty>::new($ty::default())
-        };
-        ($ty:ty, $key1:expr, $($rest:expr),+ $(,)?) => {
-            ValHandle::<$ty>::new($ty::default())
-        };
-    }
-}
 
 #[cfg(feature = "widget-inspect")]
 pub use widget_inspect::{Config, WidgetInspect};
