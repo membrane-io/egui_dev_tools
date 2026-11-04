@@ -29,6 +29,7 @@ profiling = { workspace = true }
 log = { workspace = true }
 regex = "1"
 serde = { workspace = true }
+serde_json = { workspace = true }
 subsecond = { workspace = true }
 hot_static = { workspace = true }
 
