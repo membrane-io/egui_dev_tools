@@ -89,7 +89,8 @@ pub fn set_file_opener(ctx: &egui::Context, file_opener: FileOpener) {
     ctx.data_mut(|data| data.insert_temp::<Arc<FileOpener>>(file_opener_key(), file_opener.into()));
 }
 
-pub(crate) fn open_file(ctx: &egui::Context, location: &SourceLocation) {
+/// Opens `location` with the function that [`set_file_opener`] set.
+pub fn open_file(ctx: &egui::Context, location: &SourceLocation) {
     let Some(file_opener) = ctx.data(|data| data.get_temp::<Arc<FileOpener>>(file_opener_key()))
     else {
         log::error!(
