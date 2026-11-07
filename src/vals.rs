@@ -1,7 +1,7 @@
 use egui::{
-    Button, Context, DragValue, Label, Margin, Painter, Rangef, Response, RichText, Sense, Shadow,
+    Button, Context, DragValue, Label, Margin, MarginF32, Painter, Rangef, Response, RichText,
+    Sense, Shadow,
     Stroke, TextEdit, TextStyle, Ui, Widget,
-    collapsing_header::paint_default_icon,
     emath::{Pos2, Rect, TSTransform, Vec2},
     epaint::{Color32, Shape},
     plugin::{Plugin, TypedPluginHandle},
@@ -18,6 +18,12 @@ thread_local! {
   static ACTIVE_VAL_PLACER: Cell<Option<Id>> = const { Cell::new(None) };
   static ACTIVE_VAL_PREFIX: RefCell<String> = const { RefCell::new(String::new()) };
 }
+
+/// True when the `vals` feature is on. When it is false, each val returns its default value and
+/// the code does not read or write the shared store. The macros read this constant, because a
+/// macro cannot test a feature of the crate that defines it.
+#[doc(hidden)]
+pub const ENABLED: bool = cfg!(feature = "vals");
 
 pub fn active_val_placer() -> Option<Id> {
     ACTIVE_VAL_PLACER.with(|c| c.get())
@@ -66,6 +72,12 @@ impl ValGroup {
     }
 
     pub fn with_id(widget_id: Id, name: &str) -> Self {
+        if !ENABLED {
+            return Self {
+                previous_placer: None,
+                previous_prefix: String::new(),
+            };
+        }
         let previous_placer = ACTIVE_VAL_PLACER.with(|c| c.replace(Some(widget_id)));
         let previous_prefix = ACTIVE_VAL_PREFIX.with(|c| {
             let mut current = c.borrow_mut();
@@ -87,6 +99,9 @@ impl ValGroup {
 
 impl Drop for ValGroup {
     fn drop(&mut self) {
+        if !ENABLED {
+            return;
+        }
         ACTIVE_VAL_PLACER.with(|c| c.set(self.previous_placer));
         ACTIVE_VAL_PREFIX.with(|c| *c.borrow_mut() = std::mem::take(&mut self.previous_prefix));
     }
@@ -124,6 +139,10 @@ pub use egui::Id;
 
 pub const KEY_DELIMITER: &str = "/";
 const HIERARCHY_INDENT: f32 = 8.0;
+const CARET_SIZE: f32 = 12.0;
+/// The space between a section caret and the section label.
+const CARET_GAP: f32 = 2.0;
+const ROW_ICON_SIZE: f32 = 13.0;
 
 const PLACED_PALETTE: [Color32; 8] = [
     Color32::from_rgb(80, 200, 255),
@@ -357,6 +376,69 @@ impl DebugValMetadata {
             .unwrap_or(self.module_path)
             .trim_matches('"')
     }
+
+    /// Returns the key without quotes around its segments, for example `activity ticker/pop/rounding`.
+    /// A val without a custom key returns its source location.
+    pub fn full_key(&self) -> String {
+        match &self.custom_key {
+            Some(key) => key
+                .split(KEY_DELIMITER)
+                .map(|segment| segment.trim_matches('"'))
+                .collect::<Vec<_>>()
+                .join(KEY_DELIMITER),
+            None => self.file_line_col.to_string(),
+        }
+    }
+
+    fn storage_key(&self) -> String {
+        format!("{STORAGE_KEY_PREFIX}{}", self.full_key())
+    }
+}
+
+/// The prefix of the `localStorage` key of each val. Each val has its own entry, so a save does not
+/// depend on the egui memory, and two tabs do not overwrite the vals of each other.
+const STORAGE_KEY_PREFIX: &str = "egui_dev_tools/vals/";
+
+#[cfg(target_arch = "wasm32")]
+mod storage {
+    use wasm_bindgen::prelude::*;
+
+    #[wasm_bindgen]
+    extern "C" {
+        #[wasm_bindgen(catch, js_namespace = localStorage, js_name = getItem)]
+        fn get_item(key: &str) -> Result<Option<String>, JsValue>;
+        #[wasm_bindgen(catch, js_namespace = localStorage, js_name = setItem)]
+        fn set_item(key: &str, value: &str) -> Result<(), JsValue>;
+        #[wasm_bindgen(catch, js_namespace = localStorage, js_name = removeItem)]
+        fn remove_item(key: &str) -> Result<(), JsValue>;
+    }
+
+    pub fn read(key: &str) -> Option<String> {
+        get_item(key).ok().flatten()
+    }
+
+    pub fn write(key: &str, value: &str) {
+        if let Err(err) = set_item(key, value) {
+            log::warn!("Could not write the val {key} to localStorage: {err:?}");
+        }
+    }
+
+    pub fn remove(key: &str) {
+        if let Err(err) = remove_item(key) {
+            log::warn!("Could not remove the val {key} from localStorage: {err:?}");
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+mod storage {
+    pub fn read(_key: &str) -> Option<String> {
+        None
+    }
+
+    pub fn write(_key: &str, _value: &str) {}
+
+    pub fn remove(_key: &str) {}
 }
 
 /// UI rendering hints for a debug val (e.g. min/max for numeric drag values, options for strings).
@@ -413,11 +495,11 @@ pub trait DebugVal: Any + Send + Sync {
     /// Clone this value into a boxed trait object.
     fn clone_boxed(&self) -> Box<dyn DebugVal>;
 
-    /// Persist this value into egui's data store.
-    fn save_persisted(&self, ctx: &Context, id: Id);
+    /// Serialize this value for `localStorage`, or return `None` for a type that does not persist.
+    fn to_json(&self) -> Option<String>;
 
-    /// Load a previously persisted value from egui's data store.
-    fn load_persisted(ctx: &Context, id: Id) -> Option<Box<dyn DebugVal>>
+    /// Parse a value that `to_json` wrote.
+    fn from_json(json: &str) -> Option<Self>
     where
         Self: Sized;
 }
@@ -432,6 +514,34 @@ struct DebugValEntry {
 impl DebugValEntry {
     fn is_modified(&self) -> bool {
         self.value.display_value() != self.default.display_value()
+    }
+
+    /// Render the value control with `metadata`, and store the value when the control changes it.
+    fn value_ui(&mut self, ui: &mut Ui, metadata: &DebugValMetadata) {
+        let before = self.value.to_json();
+        self.value.render_value_ui(ui, metadata, &self.params);
+        if self.value.to_json() != before {
+            self.store();
+        }
+    }
+
+    fn reset(&mut self) {
+        self.value = self.default.clone_boxed();
+        self.store();
+    }
+
+    /// Write the value to `localStorage`. A value equal to the default removes the entry.
+    fn store(&self) {
+        if self.metadata.app_controlled {
+            return;
+        }
+        let key = self.metadata.storage_key();
+        match self.value.to_json() {
+            Some(json) if Some(&json) != self.default.to_json().as_ref() => {
+                storage::write(&key, &json)
+            }
+            _ => storage::remove(&key),
+        }
     }
 }
 
@@ -471,7 +581,6 @@ impl Options {
 pub struct DebugValsPlugin {
     values: HashMap<Id, DebugValEntry>,
     order: BTreeMap<String, Id>,
-    ctx: Option<Context>,
     placed: Vec<(Id, Id)>,
     expanded_placed_groups: HashSet<Id>,
     options: Options,
@@ -482,7 +591,6 @@ impl DebugValsPlugin {
         Self {
             values: HashMap::new(),
             order: BTreeMap::new(),
-            ctx: None,
             placed: Vec::new(),
             expanded_placed_groups: HashSet::new(),
             options: Options::default(),
@@ -490,55 +598,13 @@ impl DebugValsPlugin {
     }
 
     /// Get a value from storage, or insert the default if it doesn't exist.
-    /// For user-controlled values, tries to restore from egui's persisted store first.
+    /// For user-controlled values, tries to restore the value from `localStorage` first.
     /// Params are always updated to reflect the latest call-site configuration.
     pub fn get_or_insert<T>(&mut self, id: Id, metadata: DebugValMetadata, params: ValParams) -> T
     where
         T: Clone + Default + DebugVal + 'static,
     {
-        if let Some(entry) = self.values.get_mut(&id) {
-            entry.params = params.clone();
-            if let Some(typed_val) = (entry.value.as_ref() as &dyn Any).downcast_ref::<T>() {
-                return typed_val.clone();
-            }
-        }
-
-        let default_val = T::default();
-
-        if !metadata.app_controlled {
-            if let Some(ctx) = &self.ctx {
-                if let Some(loaded) = T::load_persisted(ctx, id) {
-                    if let Some(typed) = (loaded.as_ref() as &dyn Any).downcast_ref::<T>() {
-                        let val = typed.clone();
-                        let label = metadata.display_label().to_string();
-                        self.values.insert(
-                            id,
-                            DebugValEntry {
-                                value: loaded,
-                                default: Box::new(default_val),
-                                metadata,
-                                params,
-                            },
-                        );
-                        self.order.insert(label, id);
-                        return val;
-                    }
-                }
-            }
-        }
-
-        let label = metadata.display_label().to_string();
-        self.values.insert(
-            id,
-            DebugValEntry {
-                value: Box::new(default_val.clone()),
-                default: Box::new(default_val.clone()),
-                metadata,
-                params,
-            },
-        );
-        self.order.insert(label, id);
-        default_val
+        self.get_or_insert_with(id, metadata, params, T::default())
     }
 
     /// Like `get_or_insert`, but uses a caller-provided default instead of `T::default()`.
@@ -559,40 +625,25 @@ impl DebugValsPlugin {
             }
         }
 
-        if !metadata.app_controlled {
-            if let Some(ctx) = &self.ctx {
-                if let Some(loaded) = T::load_persisted(ctx, id) {
-                    if let Some(typed) = (loaded.as_ref() as &dyn Any).downcast_ref::<T>() {
-                        let val = typed.clone();
-                        let label = metadata.display_label().to_string();
-                        self.values.insert(
-                            id,
-                            DebugValEntry {
-                                value: loaded,
-                                default: Box::new(default),
-                                metadata,
-                                params,
-                            },
-                        );
-                        self.order.insert(label, id);
-                        return val;
-                    }
-                }
-            }
-        }
+        let stored = if metadata.app_controlled {
+            None
+        } else {
+            storage::read(&metadata.storage_key()).and_then(|json| T::from_json(&json))
+        };
+        let value = stored.unwrap_or_else(|| default.clone());
 
         let label = metadata.display_label().to_string();
         self.values.insert(
             id,
             DebugValEntry {
-                value: Box::new(default.clone()),
-                default: Box::new(default.clone()),
+                value: Box::new(value.clone()),
+                default: Box::new(default),
                 metadata,
                 params,
             },
         );
         self.order.insert(label, id);
-        default
+        value
     }
 
     /// Set a value in storage.
@@ -645,6 +696,33 @@ impl DebugValsPlugin {
         }
     }
 
+    /// Counts the user-tuned values that differ from their default. An app-controlled value is not
+    /// an override, because the app writes it.
+    pub fn override_count(&self) -> usize {
+        self.values
+            .values()
+            .filter(|entry| !entry.metadata.app_controlled && entry.is_modified())
+            .count()
+    }
+
+    /// Returns one line `full key = value` for each override, in the order of the keys. The value
+    /// is a Rust expression, so it can replace the default at the call site.
+    pub fn overrides_text(&self) -> String {
+        self.order
+            .values()
+            .filter_map(|id| self.values.get(id))
+            .filter(|entry| !entry.metadata.app_controlled && entry.is_modified())
+            .map(|entry| {
+                format!(
+                    "{} = {}",
+                    entry.metadata.full_key(),
+                    entry.value.as_rust_literal()
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     /// Iterate over all values in alphabetical order by display label.
     pub fn for_each_ordered<F>(&mut self, mut f: F)
     where
@@ -673,7 +751,6 @@ impl Plugin for DebugValsPlugin {
     fn setup(&mut self, ctx: &Context) {
         self.options = Options::load(ctx);
         *PLUGIN_HANDLE.lock().unwrap() = Some(ctx.plugin::<DebugValsPlugin>());
-        self.ctx = Some(ctx.clone());
     }
 
     fn on_begin_pass(&mut self, ui: &mut Ui) {
@@ -910,6 +987,14 @@ pub struct ValHandle<T: Clone + DebugVal> {
 
 impl<T: Clone + Default + DebugVal + 'static> ValHandle<T> {
     pub fn new(id: Id, metadata: DebugValMetadata, params: ValParams) -> Self {
+        if !ENABLED {
+            return Self {
+                id,
+                metadata,
+                params,
+                value: T::default(),
+            };
+        }
         let metadata = Self::apply_prefix(metadata);
         let id = Id::unique(
             metadata
@@ -954,6 +1039,14 @@ impl<T: Clone + DebugVal + 'static> ValHandle<T> {
         params: ValParams,
         default: impl Into<T>,
     ) -> Self {
+        if !ENABLED {
+            return Self {
+                id,
+                metadata,
+                params,
+                value: default.into(),
+            };
+        }
         let metadata = Self::apply_prefix(metadata);
         let id = Id::unique(
             metadata
@@ -999,6 +1092,9 @@ impl<T: Clone + DebugVal> std::ops::DerefMut for ValHandle<T> {
 
 impl<T: Clone + DebugVal + 'static> Drop for ValHandle<T> {
     fn drop(&mut self) {
+        if !ENABLED {
+            return;
+        }
         with_plugin(|p| {
             p.set(
                 self.id,
@@ -1033,8 +1129,30 @@ macro_rules! show_debug {
 /// val!(String, "title", default = "mr", options = ["mr", "ms"]) // string with default + dropdown
 /// val!(f32, "physics", "gravity")                              // hierarchical key
 /// ```
+///
+/// When the `vals` feature is off, `val!` returns the default value and does not format the key.
 #[macro_export]
 macro_rules! val {
+  ($ty:ty, $key:expr, default = $default:expr $(, $param:ident = $value:expr)* $(,)?) => {
+    if $crate::vals::ENABLED {
+      $crate::__val_impl!($ty, $key, default = $default $(, $param = $value)*)
+    } else {
+      ::std::convert::Into::<$ty>::into($default)
+    }
+  };
+  ($ty:ty $(, $($rest:tt)*)?) => {
+    if $crate::vals::ENABLED {
+      $crate::__val_impl!($ty $(, $($rest)*)?)
+    } else {
+      <$ty as ::std::default::Default>::default()
+    }
+  };
+}
+
+/// The implementation of [`val!`] when the `vals` feature is on.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __val_impl {
   ($ty:ty) => {{
     let file_line_col = concat!(file!(), ":", line!(), ":", column!());
     let key = $crate::vals::Id::unique(file_line_col);
@@ -1293,6 +1411,11 @@ pub fn clear_val_by_key(prefix: &str) {
     with_plugin(|p| p.clear(prefix));
 }
 
+/// Returns the number of user-tuned vals that differ from their default.
+pub fn override_count() -> usize {
+    with_plugin(|p| p.override_count()).unwrap_or(0)
+}
+
 /// Remove a val and all children vals whose key starts with the given prefix.
 ///
 /// Accepts one or more key segments that are joined with `KEY_DELIMITER`.
@@ -1431,6 +1554,17 @@ impl Widget for DebugValues {
                     ui.horizontal(|ui| {
                         ui.strong("Debug Vals");
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            let size = ui.spacing().interact_size.y;
+                            if plugin.override_count() > 0
+                                && row_icon_button(ui, icons::COPY, size)
+                                    .on_hover_text(
+                                        "Copy each changed value as a line `key = value`",
+                                    )
+                                    .clicked()
+                            {
+                                ui.ctx().copy_text(plugin.overrides_text());
+                            }
+
                             let placed_prefixes = placed_prefixes_from(&plugin);
                             let placed_count = plugin.placed.len();
                             let caption = format!("Placed {placed_count}");
@@ -1609,6 +1743,7 @@ impl Widget for DebugValues {
                         plugin: &mut plugin,
                         interact_height,
                         striped: self.striped,
+                        hovered_row: None,
                     };
                     Table::new()
                         .id_salt("__vals_table")
@@ -1751,12 +1886,7 @@ impl TableDelegate for PlacedValsTableDelegate<'_> {
                 1 => {
                     ui.add_space(2.0);
                     ui.spacing_mut().item_spacing = vec2(4.0, 0.0);
-                    ui.horizontal_wrapped(|ui| {
-                        entry.value.render_value_ui(ui, &metadata, &entry.params);
-                    });
-                    if !entry.metadata.app_controlled {
-                        entry.value.save_persisted(ui.ctx(), row.val_id);
-                    }
+                    ui.horizontal_wrapped(|ui| entry.value_ui(ui, &metadata));
                 }
                 2 => {
                     ui.add_space(1.0);
@@ -1801,10 +1931,7 @@ impl TableDelegate for PlacedValsTableDelegate<'_> {
                         reset_response
                             .on_hover_text("Reset to default")
                             .clicked()
-                            .then(|| {
-                                entry.value = entry.default.clone_boxed();
-                                entry.value.save_persisted(ui.ctx(), row.val_id);
-                            });
+                            .then(|| entry.reset());
                     }
                     ui.add_space(1.0);
                 }
@@ -1819,6 +1946,8 @@ struct ValsTableDelegate<'a> {
     plugin: &'a mut DebugValsPlugin,
     interact_height: f32,
     striped: bool,
+    /// The row under the pointer. `row_ui` sets it before the table calls `cell_ui` for that row.
+    hovered_row: Option<u64>,
 }
 
 impl ValsTableDelegate<'_> {
@@ -1841,6 +1970,9 @@ impl TableDelegate for ValsTableDelegate<'_> {
     fn header_cell_ui(&mut self, _ui: &mut Ui, _cell: &HeaderCellInfo) {}
 
     fn row_ui(&mut self, ui: &mut Ui, row_nr: u64) {
+        if ui.rect_contains_pointer(ui.max_rect()) {
+            self.hovered_row = Some(row_nr);
+        }
         let row = &self.rows[row_nr as usize];
         match row {
             FlatRow::Section { .. } => {
@@ -1874,11 +2006,17 @@ impl TableDelegate for ValsTableDelegate<'_> {
                         .ctx()
                         .data_mut(|data| data.get_persisted::<bool>(*id))
                         .unwrap_or(true);
-                    let openness = ui.ctx().animate_bool(*id, expanded);
-
-                    let icon_size = Vec2::splat(self.interact_height * 0.6);
-                    let (_, icon_response) = ui.allocate_exact_size(icon_size, Sense::click());
-                    paint_default_icon(ui, openness, &icon_response);
+                    let (caret_rect, icon_response) =
+                        ui.allocate_exact_size(Vec2::splat(CARET_SIZE), Sense::click());
+                    let caret = if expanded {
+                        icons::CARET_DOWN
+                    } else {
+                        icons::CARET_RIGHT
+                    };
+                    caret
+                        .stroke(Stroke::new(1.0, ui.visuals().weak_text_color()))
+                        .paint(ui, caret_rect);
+                    ui.add_space(CARET_GAP);
 
                     let label_response =
                         ui.add(Label::new(RichText::new(name).strong()).truncate());
@@ -1903,7 +2041,7 @@ impl TableDelegate for ValsTableDelegate<'_> {
                     };
                     match cell.col_nr {
                         0 => {
-                            let indent = *depth as f32 * HIERARCHY_INDENT;
+                            let indent = *depth as f32 * HIERARCHY_INDENT + CARET_SIZE + CARET_GAP;
                             ui.add_space(indent);
                             let mut text = RichText::new(metadata.display_label());
                             if modified {
@@ -1915,58 +2053,39 @@ impl TableDelegate for ValsTableDelegate<'_> {
                         1 => {
                             ui.add_space(2.0);
                             ui.spacing_mut().item_spacing = vec2(1.0, 1.0);
-                            entry.value.render_value_ui(ui, &metadata, &entry.params);
-                            if !entry.metadata.app_controlled {
-                                entry.value.save_persisted(ui.ctx(), *val_id);
-                            }
+                            entry.value_ui(ui, &metadata);
                         }
                         2 => {
+                            let size = self.interact_height;
                             ui.add_space(1.0);
-                            if ui
-                                .add(
-                                    Button::new(RichText::new("{}").monospace().size(10.0))
-                                        .min_size(Vec2::splat(self.interact_height))
-                                        .frame(false)
-                                        .frame_when_inactive(false),
-                                )
-                                .on_hover_text(metadata.file_line_col)
-                                .clicked()
-                            {
-                                let source = SourceLocation {
-                                    path: metadata.file_line_col.to_string(),
-                                    line: 0,
-                                    column: 0,
-                                };
-                                open_file(ui.ctx(), &source);
+                            if self.hovered_row == Some(cell.row_nr) {
+                                if row_icon_button(ui, icons::FILE_CODE, size)
+                                    .on_hover_text(metadata.file_line_col)
+                                    .clicked()
+                                {
+                                    let source = SourceLocation {
+                                        path: metadata.file_line_col.to_string(),
+                                        line: 0,
+                                        column: 0,
+                                    };
+                                    open_file(ui.ctx(), &source);
+                                }
+                                let literal = entry.value.as_rust_literal();
+                                if row_icon_button(ui, icons::COPY, size)
+                                    .on_hover_text(format!("Copy: {literal}"))
+                                    .clicked()
+                                {
+                                    ui.ctx().copy_text(literal);
+                                }
+                            } else {
+                                ui.add_space(size * 2.0);
                             }
-                            let literal = entry.value.as_rust_literal();
-                            if ui
-                                .add(
-                                    Button::new(RichText::new("=").monospace().size(10.0))
-                                        .min_size(Vec2::splat(self.interact_height))
-                                        .frame(false)
-                                        .frame_when_inactive(false),
-                                )
-                                .on_hover_text(format!("Copy: {literal}"))
-                                .clicked()
-                            {
-                                ui.ctx().copy_text(literal);
-                            }
-                            let reset_response = ui.add_enabled(
-                                modified,
-                                Button::new(RichText::new("↺").size(10.0))
-                                    .min_size(Vec2::splat(self.interact_height))
-                                    .frame(false)
-                                    .frame_when_inactive(false),
-                            );
-                            if modified {
-                                reset_response
+                            if modified
+                                && row_icon_button(ui, icons::ARROW_COUNTER_CLOCKWISE, size)
                                     .on_hover_text("Reset to default")
                                     .clicked()
-                                    .then(|| {
-                                        entry.value = entry.default.clone_boxed();
-                                        entry.value.save_persisted(ui.ctx(), *val_id);
-                                    });
+                            {
+                                entry.reset();
                             }
                             ui.add_space(1.0);
                         }
@@ -1976,6 +2095,20 @@ impl TableDelegate for ValsTableDelegate<'_> {
             }
         }
     }
+}
+
+/// A frameless square button that paints `icon` in the weak text color, and in the strong text
+/// color while the pointer is on it.
+fn row_icon_button(ui: &mut Ui, icon: icons::Icon, size: f32) -> Response {
+    let (rect, response) = ui.allocate_exact_size(Vec2::splat(size), Sense::click());
+    let color = if response.hovered() {
+        ui.visuals().strong_text_color()
+    } else {
+        ui.visuals().weak_text_color()
+    };
+    let icon_rect = Rect::from_center_size(rect.center(), Vec2::splat(ROW_ICON_SIZE.min(size)));
+    icon.stroke(Stroke::new(1.0, color)).paint(ui, icon_rect);
+    response
 }
 
 #[macro_export]
@@ -2016,11 +2149,11 @@ macro_rules! impl_debug_val {
       fn clone_boxed(&self) -> Box<dyn DebugVal> {
         Box::new(self.clone())
       }
-      fn save_persisted(&self, ctx: &Context, id: Id) {
-        ctx.data_mut(|d| d.insert_persisted(id, self.clone()));
+      fn to_json(&self) -> Option<String> {
+        serde_json::to_string(self).ok()
       }
-      fn load_persisted(ctx: &Context, id: Id) -> Option<Box<dyn DebugVal>> where Self: Sized {
-        ctx.data_mut(|d| d.get_persisted::<Self>(id)).map(|v| Box::new(v) as _)
+      fn from_json(json: &str) -> Option<Self> {
+        serde_json::from_str(json).ok()
       }
     }
   };
@@ -2303,6 +2436,41 @@ impl_debug_val!(
     }
 );
 
+impl_debug_val!(
+    MarginF32,
+    "{:?}",
+    |self| format!(
+        "MarginF32 {{ left: {:.1}, right: {:.1}, top: {:.1}, bottom: {:.1} }}",
+        self.left, self.right, self.top, self.bottom
+    ),
+    |self, ui, metadata, params| {
+        if metadata.app_controlled {
+            ui.add(Label::new(
+                RichText::new(format!(
+                    "l: {:.1} r: {:.1} t: {:.1} b: {:.1}",
+                    self.left, self.right, self.top, self.bottom
+                ))
+                .monospace(),
+            ));
+        } else {
+            let speed = params.speed.unwrap_or(0.1) as f32;
+            for (label, side) in [
+                ("l:", &mut self.left),
+                ("r:", &mut self.right),
+                ("t:", &mut self.top),
+                ("b:", &mut self.bottom),
+            ] {
+                ui.label(label);
+                let mut dv = DragValue::new(side).speed(speed);
+                if let Some(min) = params.min {
+                    dv = dv.range(min as f32..=params.max.map_or(f32::MAX, |max| max as f32));
+                }
+                ui.add(dv);
+            }
+        }
+    }
+);
+
 impl<T: Clone + DebugVal + Send + Sync + 'static> DebugVal for Option<T> {
     fn render_value_ui(&mut self, ui: &mut Ui, metadata: &DebugValMetadata, params: &ValParams) {
         match self {
@@ -2331,9 +2499,11 @@ impl<T: Clone + DebugVal + Send + Sync + 'static> DebugVal for Option<T> {
         Box::new(self.clone())
     }
 
-    fn save_persisted(&self, _ctx: &Context, _id: Id) {}
+    fn to_json(&self) -> Option<String> {
+        None
+    }
 
-    fn load_persisted(_ctx: &Context, _id: Id) -> Option<Box<dyn DebugVal>> {
+    fn from_json(_json: &str) -> Option<Self> {
         None
     }
 }
